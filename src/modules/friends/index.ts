@@ -207,7 +207,7 @@ friendsApp.post('/request', authMiddleware, async (c) => {
   const user = c.get('user');
   const myHandle = user.userHandle.replace(/^@+/, '').trim().toLowerCase();
   const body = await c.req.json().catch(() => ({}));
-  const rawTarget = body.receiverHandle || body.receiver || body.targetHandle || '';
+  const rawTarget = body.receiver_handle || body.receiverHandle || body.receiver || body.target_handle || body.targetHandle || '';
   const target = rawTarget.replace(/^@+/, '').trim().toLowerCase();
 
   if (!target) {
