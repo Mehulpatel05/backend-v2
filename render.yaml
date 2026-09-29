@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: nearhood-backend-v2
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: PORT
+        value: 3000

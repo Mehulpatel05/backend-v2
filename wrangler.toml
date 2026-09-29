@@ -1,0 +1,23 @@
+name = "nearhood-backend-v2"
+main = "src/index.ts"
+compatibility_date = "2024-03-01"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+ENVIRONMENT = "production"
+JWT_SECRET = "MyJwtSecret2026Vadodara"
+JWT_ACCESS_EXPIRE_MINUTES = 30
+JWT_REFRESH_EXPIRE_DAYS = 30
+SERVER_SALT = "MySuperSecretCitySalt2026"
+WAKIT_BASE_URL = "https://wakit.in/api/v1"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "nearhood-d1"
+database_id = "6b6f48dc-e3b5-425d-aea9-4ba114a2e7de"
+migrations_dir = "migrations"
+
+[[r2_buckets]]
+binding = "MEDIA_BUCKET"
+bucket_name = "nearhood"
+preview_bucket_name = "nearhood"
