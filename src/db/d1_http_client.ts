@@ -60,16 +60,26 @@ export class D1Client {
   }
 
   prepare(sql: string) {
-    return {
-      bind: (...params: any[]) => ({
-        all: async <T = any>() => this.query<T>(sql, params),
-        first: async <T = any>() => {
-          const res = await this.query<T>(sql, params);
-          return (res.results && res.results.length > 0) ? res.results[0] : null;
-        },
-        run: async () => this.query(sql, params),
-      }),
-    };
+    const createStatement = (boundParams: any[] = []) => ({
+      bind: (...nextParams: any[]) => createStatement(nextParams),
+      all: async <T = any>() => this.query<T>(sql, boundParams),
+      first: async <T = any>(colName?: string) => {
+        const res = await this.query<T>(sql, boundParams);
+        if (!res.results || res.results.length === 0) return null;
+        const row = res.results[0] as any;
+        if (colName && row) {
+          return row[colName] !== undefined ? row[colName] : null;
+        }
+        return row;
+      },
+      run: async () => this.query(sql, boundParams),
+      raw: async <T = any>() => {
+        const res = await this.query<T>(sql, boundParams);
+        return (res.results || []) as T[];
+      },
+    });
+
+    return createStatement([]);
   }
 
   async batch(statements: any[]) {
