@@ -1,12 +1,15 @@
 import { Context } from 'hono';
 import { Env, Variables } from '../types';
-import { D1Client } from './d1_http_client';
+import { SqliteD1Adapter } from './sqlite_engine';
 
-const globalD1Client = new D1Client();
+let globalSqliteAdapter: SqliteD1Adapter | null = null;
 
 export function getDatabase(c: Context<{ Bindings: Env; Variables: Variables }>) {
-  if (c.env && c.env.DB) {
-    return c.env.DB;
+  if (c?.env && (c.env as any).DB) {
+    return (c.env as any).DB;
   }
-  return globalD1Client as any;
+  if (!globalSqliteAdapter) {
+    globalSqliteAdapter = new SqliteD1Adapter();
+  }
+  return globalSqliteAdapter as any;
 }
