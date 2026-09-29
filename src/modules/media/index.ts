@@ -26,15 +26,20 @@ function getS3Client() {
 mediaApp.post('/upload', async (c) => {
   let userHandle = '@anonymous';
   try {
-    const authHeader = c.req.header('Authorization');
-    if (authHeader && authHeader.startsWith('Bearer ')) {
-      // Decode JWT payload without failing if expired
-      const token = authHeader.substring(7);
-      const parts = token.split('.');
-      if (parts.length === 3) {
-        const payload = JSON.parse(Buffer.from(parts[1], 'base64').toString('utf8'));
-        if (payload.userHandle) userHandle = payload.userHandle;
-        else if (payload.handle) userHandle = payload.handle;
+    const customHeaderHandle = c.req.header('x-user-handle') || c.req.header('user-handle');
+    if (customHeaderHandle && customHeaderHandle.trim().length > 0) {
+      userHandle = customHeaderHandle.trim();
+    } else {
+      const authHeader = c.req.header('Authorization');
+      if (authHeader && authHeader.startsWith('Bearer ')) {
+        // Decode JWT payload without failing if expired
+        const token = authHeader.substring(7);
+        const parts = token.split('.');
+        if (parts.length === 3) {
+          const payload = JSON.parse(Buffer.from(parts[1], 'base64').toString('utf8'));
+          if (payload.userHandle) userHandle = payload.userHandle;
+          else if (payload.handle) userHandle = payload.handle;
+        }
       }
     }
   } catch (_) {}
@@ -43,7 +48,7 @@ mediaApp.post('/upload', async (c) => {
   const folder = query.folder || 'feed';
   const subId = query.subId || '';
 
-  const formData = await c.req.parseBody().catch(() => ({}));
+  const formData = (await c.req.parseBody().catch(() => ({}))) as Record<string, any>;
   let file = formData['file'] || formData['media'] || formData['image'];
 
   if (!file || !(file instanceof File)) {

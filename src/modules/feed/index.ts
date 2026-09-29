@@ -20,10 +20,12 @@ function formatPostRow(row: any, userVote: number = 0) {
     reporters = [];
   }
 
+  const cleanAuthor = (row.author_handle || '').replace(/^@+/, '').trim();
+
   return {
     id: row.id,
-    authorHandle: row.author_handle,
-    author_handle: row.author_handle,
+    authorHandle: cleanAuthor,
+    author_handle: cleanAuthor,
     content: row.content || '',
     category: row.category || 'general',
     imageUrl: row.image_url || (mediaUrls.length > 0 ? mediaUrls[0] : null),
@@ -164,7 +166,7 @@ async function handleCreatePost(c: any) {
 
   const postId = `post_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`;
   const mediaJson = JSON.stringify(mediaUrls.length > 0 ? mediaUrls : (imageUrl ? [imageUrl] : []));
-  const cleanHandle = authorHandle.startsWith('@') ? authorHandle : `@${authorHandle}`;
+  const cleanHandle = (authorHandle || user.userHandle || '').replace(/^@+/, '').trim();
 
   const db = getDatabase(c);
 

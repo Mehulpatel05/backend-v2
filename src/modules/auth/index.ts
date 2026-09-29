@@ -77,18 +77,18 @@ async function handleVerifyOtp(c: any) {
   const db = getDatabase(c);
 
   // Check if user exists by phone
-  let user = await db.prepare('SELECT id, phone, handle FROM users WHERE phone = ? LIMIT 1')
+  let user = (await db.prepare('SELECT id, phone, handle FROM users WHERE phone = ? LIMIT 1')
     .bind(e164 || `phone_${installationId.slice(-8)}`)
-    .first<{ id: string; phone: string; handle: string }>();
+    .first()) as { id: string; phone: string; handle: string } | null;
 
-  let handle = user?.handle || '';
+  let handle = user?.handle ? user.handle.replace(/^@+/, '').trim() : '';
   let userId = user?.id || '';
   const isNewUser = !user;
 
   if (isNewUser) {
     userId = `u_${Date.now()}`;
     const suffix = e164 ? e164.slice(-4) : Math.floor(1000 + Math.random() * 9000).toString();
-    handle = `@user_${suffix}_${Math.floor(1000 + Math.random() * 9000)}`;
+    handle = `user_${suffix}_${Math.floor(1000 + Math.random() * 9000)}`;
 
     try {
       await db.prepare(
@@ -151,30 +151,27 @@ authApp.post('/otp/verify', handleVerifyOtp);
 async function handleClaimHandle(c: any) {
   const user = c.get('user');
   const body = await c.req.json().catch(() => ({}));
-  let newHandle = (body.handle || '').trim();
+  let newHandle = (body.handle || '').replace(/^@+/, '').trim();
 
   if (!newHandle) {
     return c.json({ success: false, error: 'Handle cannot be empty' }, 400);
   }
 
-  if (!newHandle.startsWith('@')) {
-    newHandle = `@${newHandle}`;
-  }
-
   const db = getDatabase(c);
+  const currentUserHandle = (user.userHandle || '').replace(/^@+/, '').trim();
 
-  const existing = await db.prepare('SELECT handle FROM users WHERE handle = ? LIMIT 1')
-    .bind(newHandle)
+  const existing = await db.prepare('SELECT handle FROM users WHERE handle = ? OR handle = ? LIMIT 1')
+    .bind(newHandle, `@${newHandle}`)
     .first();
 
-  if (existing && (existing as any).handle !== user.userHandle) {
+  if (existing && (existing as any).handle.replace(/^@+/, '').trim() !== currentUserHandle) {
     return c.json({ success: false, error: 'Handle is already taken' }, 409);
   }
 
   try {
     await db.batch([
-      db.prepare('UPDATE users SET handle = ? WHERE handle = ?').bind(newHandle, user.userHandle),
-      db.prepare('UPDATE profiles SET handle = ? WHERE handle = ?').bind(newHandle, user.userHandle),
+      db.prepare('UPDATE users SET handle = ? WHERE handle = ? OR handle = ?').bind(newHandle, currentUserHandle, `@${currentUserHandle}`),
+      db.prepare('UPDATE profiles SET handle = ? WHERE handle = ? OR handle = ?').bind(newHandle, currentUserHandle, `@${currentUserHandle}`),
       db.prepare('UPDATE devices SET user_handle = ? WHERE installation_id = ?').bind(newHandle, user.installationId),
     ]);
   } catch (e) {
@@ -195,16 +192,15 @@ authApp.post('/profile/handle', authMiddleware, handleClaimHandle);
 // Check Handle Available
 authApp.get('/check-handle', async (c) => {
   const raw = c.req.query('handle') || '';
-  let handle = raw.trim();
-  if (handle && !handle.startsWith('@')) handle = `@${handle}`;
+  const handle = raw.replace(/^@+/, '').trim();
 
   if (!handle) {
     return c.json({ success: false, available: false, error: 'Handle required' }, 400);
   }
 
   const db = getDatabase(c);
-  const existing = await db.prepare('SELECT handle FROM users WHERE handle = ? LIMIT 1')
-    .bind(handle)
+  const existing = await db.prepare('SELECT handle FROM users WHERE handle = ? OR handle = ? LIMIT 1')
+    .bind(handle, `@${handle}`)
     .first();
 
   return c.json({
@@ -230,25 +226,69 @@ authApp.get('/profile', authMiddleware, async (c) => {
   const user = c.get('user');
   const db = getDatabase(c);
 
-  const u = await db.prepare('SELECT id, phone, handle FROM users WHERE handle = ? LIMIT 1')
-    .bind(user.userHandle)
-    .first<any>();
+  const u = (await db.prepare('SELECT id, phone, handle FROM users WHERE handle = ? OR handle = ? LIMIT 1')
+    .bind(user.userHandle, `@${user.userHandle}`)
+    .first()) as any;
 
-  const profile = await db.prepare('SELECT * FROM profiles WHERE handle = ? LIMIT 1')
-    .bind(user.userHandle)
-    .first<any>();
+  const profile = (await db.prepare('SELECT * FROM profiles WHERE handle = ? OR handle = ? LIMIT 1')
+    .bind(user.userHandle, `@${user.userHandle}`)
+    .first()) as any;
 
   return c.json({
     success: true,
     user: {
       userId: u?.id || '',
       phoneNumber: u?.phone || '',
-      handle: user.userHandle,
-      displayName: profile?.display_name || user.userHandle,
+      handle: user.userHandle.replace(/^@+/, ''),
+      displayName: profile?.display_name || user.userHandle.replace(/^@+/, ''),
       avatarUrl: profile?.avatar_r2_path || '',
       bio: profile?.bio || '',
       friendCount: profile?.friend_count || 0,
     },
+  });
+});
+
+// 5.1 GET Public Profile by handle
+authApp.get('/profile/:handle', async (c) => {
+  const rawParam = c.req.param('handle') || '';
+  const handle = rawParam.replace(/^@+/, '').trim();
+  const db = getDatabase(c);
+
+  const profile = (await db.prepare('SELECT * FROM profiles WHERE handle = ? OR handle = ? LIMIT 1')
+    .bind(handle, `@${handle}`)
+    .first()) as any;
+
+  const u = (await db.prepare('SELECT id, handle, phone FROM users WHERE handle = ? OR handle = ? LIMIT 1')
+    .bind(handle, `@${handle}`)
+    .first()) as any;
+
+  if (!profile && !u) {
+    return c.json({
+      success: true,
+      user: {
+        handle: handle,
+        displayName: handle,
+        avatarUrl: '',
+        bio: '',
+        friendCount: 0,
+      }
+    });
+  }
+
+  return c.json({
+    success: true,
+    user: {
+      userId: u?.id || '',
+      handle: handle,
+      displayName: profile?.display_name || handle,
+      avatarUrl: profile?.avatar_r2_path || '',
+      bio: profile?.bio || '',
+      friendCount: profile?.friend_count || 0,
+    },
+    profile: profile ? {
+      ...profile,
+      handle: handle,
+    } : null,
   });
 });
 

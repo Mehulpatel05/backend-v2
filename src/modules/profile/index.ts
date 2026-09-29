@@ -7,13 +7,13 @@ const profileApp = new Hono<{ Bindings: Env; Variables: Variables }>();
 
 // 1. Get Profile by Handle
 profileApp.get('/:handle', async (c) => {
-  let handle = c.req.param('handle');
-  if (!handle.startsWith('@')) handle = `@${handle}`;
+  const raw = c.req.param('handle');
+  const cleanHandle = raw.replace(/^@+/, '').trim();
 
   const db = getDatabase(c);
-  const profile = await db.prepare('SELECT * FROM profiles WHERE handle = ? LIMIT 1')
-    .bind(handle)
-    .first();
+  const profile = (await db.prepare('SELECT * FROM profiles WHERE handle = ? OR handle = ? LIMIT 1')
+    .bind(cleanHandle, `@${cleanHandle}`)
+    .first()) as any;
 
   if (!profile) {
     return c.json({ success: false, error: 'Profile not found' }, 404);
@@ -21,13 +21,17 @@ profileApp.get('/:handle', async (c) => {
 
   return c.json({
     success: true,
-    profile,
+    profile: {
+      ...profile,
+      handle: profile.handle.replace(/^@+/, '').trim(),
+    },
   });
 });
 
 // 2. Update Own Profile
 profileApp.put('/', authMiddleware, async (c) => {
   const user = c.get('user');
+  const cleanUserHandle = (user.userHandle || '').replace(/^@+/, '').trim();
   const body = await c.req.json().catch(() => ({}));
 
   const displayName = body.displayName ?? body.display_name;
@@ -65,19 +69,22 @@ profileApp.put('/', authMiddleware, async (c) => {
   }
 
   updates.push('updated_at = CURRENT_TIMESTAMP');
-  params.push(user.userHandle);
+  params.push(cleanUserHandle, `@${cleanUserHandle}`);
 
   const db = getDatabase(c);
-  const query = `UPDATE profiles SET ${updates.join(', ')} WHERE handle = ?`;
+  const query = `UPDATE profiles SET ${updates.join(', ')} WHERE handle = ? OR handle = ?`;
   await db.prepare(query).bind(...params).run();
 
-  const updated = await db.prepare('SELECT * FROM profiles WHERE handle = ? LIMIT 1')
-    .bind(user.userHandle)
-    .first();
+  const updated = (await db.prepare('SELECT * FROM profiles WHERE handle = ? OR handle = ? LIMIT 1')
+    .bind(cleanUserHandle, `@${cleanUserHandle}`)
+    .first()) as any;
 
   return c.json({
     success: true,
-    profile: updated,
+    profile: updated ? {
+      ...updated,
+      handle: updated.handle.replace(/^@+/, '').trim(),
+    } : null,
     message: 'Profile updated successfully',
   });
 });

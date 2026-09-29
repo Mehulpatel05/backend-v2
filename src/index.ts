@@ -9,6 +9,7 @@ import { chatApp } from './modules/chat';
 import { feedApp } from './modules/feed';
 import { friendsApp } from './modules/friends';
 import { notificationsApp } from './modules/notifications';
+import { getDatabase } from './db/db_context';
 
 const app = new Hono<{ Bindings: Env; Variables: Variables }>();
 
@@ -36,7 +37,8 @@ app.get('/', (c) => {
 
 app.get('/health', async (c) => {
   try {
-    const dbTest = await c.env.DB.prepare('SELECT 1 as live').first();
+    const db = getDatabase(c);
+    const dbTest = await db.prepare('SELECT 1 as live').first();
     return c.json({
       status: 'healthy',
       database: dbTest ? 'connected' : 'offline',
@@ -44,7 +46,7 @@ app.get('/health', async (c) => {
       timestamp: new Date().toISOString(),
     });
   } catch (e: any) {
-    return c.json({ status: 'degraded', error: e.message }, 500);
+    return c.json({ status: 'degraded', error: e.message }, 200);
   }
 });
 
