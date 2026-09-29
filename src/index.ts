@@ -52,10 +52,12 @@ app.get('/health', async (c) => {
 app.route('/api/v2/auth', authApp);
 app.route('/api/v2/profile', profileApp);
 app.route('/api/v2/media', mediaApp);
+app.route('/api/v2/storage', mediaApp);
 app.route('/api/v2/bazar', bazarApp);
 app.route('/api/v2/chats', chatApp);
 app.route('/api/v2/chat', chatApp);
 app.route('/api/v2/feed', feedApp);
+app.route('/api/v2/posts', feedApp);
 app.route('/api/v2/friends', friendsApp);
 app.route('/api/v2/notifications', notificationsApp);
 
