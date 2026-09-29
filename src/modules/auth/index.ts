@@ -190,6 +190,7 @@ async function handleClaimHandle(c: any) {
 
 authApp.post('/claim-handle', authMiddleware, handleClaimHandle);
 authApp.post('/handle/claim', authMiddleware, handleClaimHandle);
+authApp.post('/profile/handle', authMiddleware, handleClaimHandle);
 
 // Check Handle Available
 authApp.get('/check-handle', async (c) => {
@@ -224,7 +225,64 @@ authApp.post('/refresh', async (c) => {
   });
 });
 
-// Get Current Auth State
+// 5. GET Profile for Current Logged in User
+authApp.get('/profile', authMiddleware, async (c) => {
+  const user = c.get('user');
+  const db = getDatabase(c);
+
+  const u = await db.prepare('SELECT id, phone, handle FROM users WHERE handle = ? LIMIT 1')
+    .bind(user.userHandle)
+    .first<any>();
+
+  const profile = await db.prepare('SELECT * FROM profiles WHERE handle = ? LIMIT 1')
+    .bind(user.userHandle)
+    .first<any>();
+
+  return c.json({
+    success: true,
+    user: {
+      userId: u?.id || '',
+      phoneNumber: u?.phone || '',
+      handle: user.userHandle,
+      displayName: profile?.display_name || user.userHandle,
+      avatarUrl: profile?.avatar_r2_path || '',
+      bio: profile?.bio || '',
+      friendCount: profile?.friend_count || 0,
+    },
+  });
+});
+
+// 6. DELETE Account permanently
+authApp.delete('/account', authMiddleware, async (c) => {
+  const user = c.get('user');
+  const db = getDatabase(c);
+
+  try {
+    await db.batch([
+      db.prepare('DELETE FROM devices WHERE user_handle = ? OR installation_id = ?').bind(user.userHandle, user.installationId),
+      db.prepare('DELETE FROM profiles WHERE handle = ?').bind(user.userHandle),
+      db.prepare('DELETE FROM bazar_listings WHERE seller_handle = ?').bind(user.userHandle),
+      db.prepare('DELETE FROM bazar_shops WHERE owner_handle = ?').bind(user.userHandle),
+      db.prepare('DELETE FROM bazar_saved WHERE user_handle = ?').bind(user.userHandle),
+      db.prepare('DELETE FROM feed_posts WHERE author_handle = ?').bind(user.userHandle),
+      db.prepare('DELETE FROM feed_likes WHERE user_handle = ?').bind(user.userHandle),
+      db.prepare('DELETE FROM feed_comments WHERE author_handle = ?').bind(user.userHandle),
+      db.prepare('DELETE FROM friend_requests WHERE sender_handle = ? OR receiver_handle = ?').bind(user.userHandle, user.userHandle),
+      db.prepare('DELETE FROM friendships WHERE user1_handle = ? OR user2_handle = ?').bind(user.userHandle, user.userHandle),
+      db.prepare('DELETE FROM notifications WHERE target_handle = ? OR sender_handle = ?').bind(user.userHandle, user.userHandle),
+      db.prepare('DELETE FROM users WHERE handle = ?').bind(user.userHandle),
+    ]);
+  } catch (e) {
+    console.error('[deleteAccount] D1 batch delete error:', e);
+  }
+
+  return c.json({
+    success: true,
+    message: 'Account deleted permanently',
+  });
+});
+
+// Get Current Auth State (Me)
 authApp.get('/me', authMiddleware, async (c) => {
   const user = c.get('user');
   const db = getDatabase(c);
