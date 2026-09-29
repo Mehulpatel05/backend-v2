@@ -297,9 +297,9 @@ async function handlePostVote(c: any) {
         return c.json({ success: true, userVote: voteType });
       }
     } else {
-      // New vote
+      // New vote with ON CONFLICT safety
       await db.batch([
-        db.prepare('INSERT INTO post_votes (id, post_id, user_handle, vote_type) VALUES (?, ?, ?, ?)').bind(voteId, postId, cleanHandle, voteType),
+        db.prepare('INSERT INTO post_votes (id, post_id, user_handle, vote_type) VALUES (?, ?, ?, ?) ON CONFLICT(post_id, user_handle) DO UPDATE SET vote_type = excluded.vote_type').bind(voteId, postId, cleanHandle, voteType),
         voteType === 1
           ? db.prepare('UPDATE feed_posts SET upvotes = upvotes + 1, likes_count = likes_count + 1 WHERE id = ?').bind(postId)
           : db.prepare('UPDATE feed_posts SET downvotes = downvotes + 1 WHERE id = ?').bind(postId),
@@ -333,7 +333,7 @@ feedApp.post('/:id/like', authMiddleware, async (c) => {
   } else {
     const likeId = `like_${Date.now()}`;
     await db.batch([
-      db.prepare('INSERT INTO feed_likes (id, post_id, user_handle) VALUES (?, ?, ?)').bind(likeId, postId, user.userHandle),
+      db.prepare('INSERT INTO feed_likes (id, post_id, user_handle) VALUES (?, ?, ?) ON CONFLICT(post_id, user_handle) DO NOTHING').bind(likeId, postId, user.userHandle),
       db.prepare('UPDATE feed_posts SET likes_count = likes_count + 1, upvotes = upvotes + 1 WHERE id = ?').bind(postId),
     ]);
     return c.json({ success: true, isLiked: true, message: 'Post liked' });
