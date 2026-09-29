@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { Env, Variables } from '../../types';
 import { authMiddleware, hashToken } from '../../middleware/auth';
 import { getDatabase } from '../../db/db_context';
+import { WakitService } from '../../services/wakit_service';
 
 const authApp = new Hono<{ Bindings: Env; Variables: Variables }>();
 
@@ -23,14 +24,28 @@ async function handleSendOtp(c: any) {
     return c.json({ success: false, error: 'Valid phone number is required' }, 400);
   }
 
-  const requestId = `req_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`;
+  const cleanDigits = phone.replace(/\D/g, '');
+  const e164 = cleanDigits.length === 10 ? `+91${cleanDigits}` : `+${cleanDigits}`;
+
+  // Call Wakit WhatsApp OTP Service
+  const otpRes = await WakitService.sendOtp(e164);
+
+  if (!otpRes.success) {
+    return c.json({
+      success: false,
+      error: otpRes.error || 'Failed to send OTP via WhatsApp gateway',
+    }, 500);
+  }
+
+  const requestId = otpRes.requestId || `req_${Date.now()}`;
 
   return c.json({
     success: true,
     requestId,
     request_id: requestId,
-    phone,
-    message: 'OTP sent successfully to ' + phone,
+    phone: e164,
+    phoneNumber: e164,
+    message: 'OTP sent successfully to ' + e164,
   });
 }
 
@@ -43,17 +58,27 @@ async function handleVerifyOtp(c: any) {
   const rawPhone = body.phoneNumber || body.phone_number || body.phone || '';
   const phone = rawPhone.toString().trim();
   const otp = (body.otp || body.code || '').toString().trim();
+  const requestId = (body.requestId || body.request_id || '').toString().trim();
   const installationId = (body.installationId || body.installation_id || `inst_${Date.now()}`).toString().trim();
 
   if (!otp) {
     return c.json({ success: false, error: 'OTP code is required' }, 400);
   }
 
+  const cleanDigits = phone.replace(/\D/g, '');
+  const e164 = cleanDigits.length === 10 ? `+91${cleanDigits}` : (cleanDigits ? `+${cleanDigits}` : '');
+
+  // Verify OTP via Wakit Gateway
+  const isValidOtp = await WakitService.verifyOtp(requestId, otp, e164);
+  if (!isValidOtp) {
+    return c.json({ success: false, error: 'Invalid or expired OTP' }, 400);
+  }
+
   const db = getDatabase(c);
 
   // Check if user exists by phone
   let user = await db.prepare('SELECT id, phone, handle FROM users WHERE phone = ? LIMIT 1')
-    .bind(phone || `phone_${installationId.slice(-8)}`)
+    .bind(e164 || `phone_${installationId.slice(-8)}`)
     .first<{ id: string; phone: string; handle: string }>();
 
   let handle = user?.handle || '';
@@ -62,14 +87,14 @@ async function handleVerifyOtp(c: any) {
 
   if (isNewUser) {
     userId = `u_${Date.now()}`;
-    const suffix = phone ? phone.slice(-4) : Math.floor(1000 + Math.random() * 9000).toString();
+    const suffix = e164 ? e164.slice(-4) : Math.floor(1000 + Math.random() * 9000).toString();
     handle = `@user_${suffix}_${Math.floor(1000 + Math.random() * 9000)}`;
 
     try {
       await db.prepare(
         'INSERT INTO users (id, phone, handle) VALUES (?, ?, ?)'
       )
-        .bind(userId, phone || `guest_${userId}`, handle)
+        .bind(userId, e164 || `guest_${userId}`, handle)
         .run();
 
       await db.prepare(
@@ -111,7 +136,7 @@ async function handleVerifyOtp(c: any) {
     sessionToken,
     user: {
       userId,
-      phoneNumber: phone,
+      phoneNumber: e164,
       handle,
       isNewUser,
     },
