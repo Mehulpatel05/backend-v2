@@ -3,6 +3,8 @@
  * Reads credentials strictly from process.env / Cloudflare Bindings
  */
 
+import { AppConfig } from '../utils/config';
+
 export interface D1QueryResult<T = any> {
   results?: T[];
   meta?: any;
@@ -15,9 +17,9 @@ export class D1Client {
   private databaseId: string;
 
   constructor(accountId?: string, apiToken?: string, databaseId?: string) {
-    this.accountId = accountId || process.env.CLOUDFLARE_ACCOUNT_ID || '';
-    this.apiToken = apiToken || process.env.CLOUDFLARE_API_TOKEN || '';
-    this.databaseId = databaseId || process.env.D1_DATABASE_ID || process.env.CLOUDFLARE_D1_DATABASE_ID || '';
+    this.accountId = accountId || AppConfig.cfAccountId;
+    this.apiToken = apiToken || AppConfig.cfApiToken;
+    this.databaseId = databaseId || AppConfig.d1DatabaseId;
   }
 
   async query<T = any>(sql: string, params: any[] = []): Promise<D1QueryResult<T>> {

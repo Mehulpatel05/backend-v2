@@ -76,7 +76,7 @@ notificationsApp.post('/', async (c) => {
   const rawSender = body.sender_handle || body.senderHandle || body.sender || '';
   const senderHandle = rawSender.replace(/^@+/, '').trim().toLowerCase();
   const title = body.title || 'Nearhood';
-  const notifBody = body.body || '';
+  const notifBody = body.body || body.message || '';
   const type = body.type || 'general';
   const payloadData = body.data || body.payload || {};
 

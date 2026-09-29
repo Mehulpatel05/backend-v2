@@ -5,6 +5,8 @@ import { R2UserStorageHelper } from '../../utils/r2_helper';
 import { S3Client, PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 
+import { AppConfig } from '../../utils/config';
+
 const mediaApp = new Hono<{ Bindings: Env; Variables: Variables }>();
 
 let s3Client: S3Client | null = null;
@@ -12,10 +14,10 @@ function getS3Client() {
   if (!s3Client) {
     s3Client = new S3Client({
       region: 'auto',
-      endpoint: process.env.R2_ENDPOINT_URL || '',
+      endpoint: AppConfig.r2Endpoint,
       credentials: {
-        accessKeyId: process.env.R2_ACCESS_KEY_ID || '',
-        secretAccessKey: process.env.R2_SECRET_ACCESS_KEY || '',
+        accessKeyId: AppConfig.r2AccessKeyId,
+        secretAccessKey: AppConfig.r2SecretAccessKey,
       },
     });
   }
