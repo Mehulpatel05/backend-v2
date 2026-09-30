@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS devices (
     installation_id TEXT PRIMARY KEY,
     token_hash TEXT NOT NULL,
+    refresh_token_hash TEXT,
     user_handle TEXT NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     last_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -35,6 +36,7 @@ CREATE TABLE IF NOT EXISTS devices (
 );
 
 CREATE INDEX IF NOT EXISTS idx_devices_token ON devices(token_hash);
+CREATE INDEX IF NOT EXISTS idx_devices_refresh_token ON devices(refresh_token_hash);
 CREATE INDEX IF NOT EXISTS idx_devices_user ON devices(user_handle);
 
 CREATE TABLE IF NOT EXISTS profiles (
@@ -55,14 +57,47 @@ CREATE TABLE IF NOT EXISTS feed_posts (
     id TEXT PRIMARY KEY,
     author_handle TEXT NOT NULL,
     content TEXT NOT NULL,
+    category TEXT DEFAULT 'general',
+    city_id TEXT DEFAULT '',
+    area_id TEXT DEFAULT '',
+    area_name TEXT DEFAULT '',
+    image_url TEXT DEFAULT '',
     media_urls_json TEXT DEFAULT '[]',
     audio_url TEXT DEFAULT '',
     likes_count INTEGER DEFAULT 0,
     comments_count INTEGER DEFAULT 0,
+    upvotes INTEGER DEFAULT 0,
+    downvotes INTEGER DEFAULT 0,
+    report_count INTEGER DEFAULT 0,
+    reporters_json TEXT DEFAULT '[]',
+    lat REAL,
+    lng REAL,
+    room_title TEXT DEFAULT '',
+    room_area TEXT DEFAULT '',
+    room_rent TEXT DEFAULT '',
+    shop_title TEXT DEFAULT '',
+    shop_price TEXT DEFAULT '',
+    shop_category TEXT DEFAULT '',
+    food_title TEXT DEFAULT '',
+    food_rating REAL,
+    food_price TEXT DEFAULT '',
+    event_title TEXT DEFAULT '',
+    event_date TEXT DEFAULT '',
+    event_location_text TEXT DEFAULT '',
+    event_price TEXT DEFAULT '',
+    job_title TEXT DEFAULT '',
+    job_company TEXT DEFAULT '',
+    job_location TEXT DEFAULT '',
+    job_type TEXT DEFAULT '',
+    service_title TEXT DEFAULT '',
+    service_category_text TEXT DEFAULT '',
+    service_price TEXT DEFAULT '',
+    extra_json TEXT DEFAULT '{}',
     status TEXT DEFAULT 'active',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(author_handle) REFERENCES users(handle) ON DELETE CASCADE
 );
+
 
 CREATE INDEX IF NOT EXISTS idx_feed_author ON feed_posts(author_handle);
 CREATE INDEX IF NOT EXISTS idx_feed_created ON feed_posts(created_at DESC);
@@ -89,7 +124,44 @@ CREATE TABLE IF NOT EXISTS feed_comments (
 
 CREATE INDEX IF NOT EXISTS idx_feed_comments_post ON feed_comments(post_id);
 
+CREATE TABLE IF NOT EXISTS post_votes (
+    id TEXT PRIMARY KEY,
+    post_id TEXT NOT NULL,
+    user_handle TEXT NOT NULL,
+    vote_type INTEGER NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(post_id, user_handle),
+    FOREIGN KEY(post_id) REFERENCES feed_posts(id) ON DELETE CASCADE,
+    FOREIGN KEY(user_handle) REFERENCES users(handle) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_post_votes_user ON post_votes(user_handle);
+CREATE INDEX IF NOT EXISTS idx_post_votes_post ON post_votes(post_id);
+
+CREATE TABLE IF NOT EXISTS user_preferences (
+    user_handle TEXT PRIMARY KEY,
+    call_privacy TEXT DEFAULT 'everyone',
+    pinned_chats_json TEXT DEFAULT '[]',
+    muted_chats_json TEXT DEFAULT '[]',
+    theme TEXT DEFAULT 'dark',
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(user_handle) REFERENCES users(handle) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS user_feedback (
+    id TEXT PRIMARY KEY,
+    user_handle TEXT NOT NULL,
+    category TEXT DEFAULT 'general',
+    feedback_text TEXT NOT NULL,
+    app_version TEXT DEFAULT '',
+    device_info TEXT DEFAULT '',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_feedback_user ON user_feedback(user_handle);
+
 CREATE TABLE IF NOT EXISTS bazar_shops (
+
     id TEXT PRIMARY KEY,
     owner_handle TEXT NOT NULL,
     shop_name TEXT NOT NULL,

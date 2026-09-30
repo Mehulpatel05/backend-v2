@@ -1,36 +1,34 @@
-function decodeB64(val: string): string {
-  if (typeof Buffer !== 'undefined') {
-    return Buffer.from(val, 'base64').toString('utf8');
-  }
-  return typeof atob !== 'undefined' ? atob(val) : '';
-}
-
 export const AppConfig = {
   get cfAccountId(): string {
-    return process.env.CLOUDFLARE_ACCOUNT_ID || decodeB64('ODdhZGE2ZGQ4MDdmMzk1OGQ4Y2IzOTZiNTIxMTY2MmM=');
+    return (process.env.CLOUDFLARE_ACCOUNT_ID || '').trim();
   },
   get cfApiToken(): string {
-    return process.env.CLOUDFLARE_API_TOKEN || decodeB64('Y2Z1dF9jdzBDQjZpdW53cVBxZEhSVnc0VVdWRmVlR1FZTDBFckJLMDRLbXJzNGI0OWI0Yjk=');
+    return (process.env.CLOUDFLARE_API_TOKEN || '').trim();
   },
   get d1DatabaseId(): string {
-    return process.env.D1_DATABASE_ID || process.env.CLOUDFLARE_D1_DATABASE_ID || decodeB64('NmI2ZjQ4ZGMtZTNiNS00MjVkLWFlYTktNGJhMTE0YTJlN2Rl');
+    return (process.env.D1_DATABASE_ID || process.env.CLOUDFLARE_D1_DATABASE_ID || '').trim();
   },
   get r2Bucket(): string {
-    return process.env.R2_BUCKET_NAME || process.env.CLOUDFLARE_R2_BUCKET_NAME || 'nearhood';
+    return (process.env.R2_BUCKET_NAME || process.env.CLOUDFLARE_R2_BUCKET_NAME || 'nearhood').trim();
   },
   get r2AccessKeyId(): string {
-    return process.env.R2_ACCESS_KEY_ID || process.env.CLOUDFLARE_R2_ACCESS_KEY_ID || decodeB64('MDYzYTkyOGY0OWJmMGQ2Yjc0M2IyMzAyNWU2NmFiM2M=');
+    return (process.env.R2_ACCESS_KEY_ID || process.env.CLOUDFLARE_R2_ACCESS_KEY_ID || '').trim();
   },
   get r2SecretAccessKey(): string {
-    return process.env.R2_SECRET_ACCESS_KEY || process.env.CLOUDFLARE_R2_SECRET_ACCESS_KEY || decodeB64('N2FlMTRmZWRmZGE0OTBlZjc1YjI5M2M4YjI0YzRmZTQwZGI4YjE2MGJhNDAwMWI3MzgxMDFlMmNlOTc0NDhmMg==');
+    return (process.env.R2_SECRET_ACCESS_KEY || process.env.CLOUDFLARE_R2_SECRET_ACCESS_KEY || '').trim();
   },
   get r2Endpoint(): string {
-    return process.env.R2_ENDPOINT_URL || decodeB64('aHR0cHM6Ly84N2FkYTZkZDgwN2YzOTU4ZDhjYjM5NmI1MjExNjYyYy5yMi5jbG91ZGZsYXJlc3RvcmFnZS5jb20=');
+    return (process.env.R2_ENDPOINT_URL || (this.cfAccountId ? `https://${this.cfAccountId}.r2.cloudflarestorage.com` : '')).trim();
   },
   get r2PublicUrl(): string {
-    return process.env.R2_PUBLIC_URL_PREFIX || 'https://pub-87ada6dd807f3958d8cb396b5211662c.r2.dev';
+    return (process.env.R2_PUBLIC_URL_PREFIX || process.env.CLOUDFLARE_R2_PUBLIC_DOMAIN || '').trim();
   },
   get jwtSecret(): string {
-    return process.env.JWT_SECRET || 'MyJwtSecret2026Vadodara';
+    const secret = (process.env.JWT_SECRET || '').trim();
+    if (!secret && process.env.NODE_ENV === 'production') {
+      console.error('[AppConfig] JWT_SECRET environment variable is missing!');
+    }
+    return secret || 'dev_jwt_secret_nearhood_2026';
   },
 };
+

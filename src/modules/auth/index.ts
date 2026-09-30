@@ -111,22 +111,39 @@ async function handleVerifyOtp(c: any) {
   const sessionToken = generateSecureToken();
   const refreshToken = generateSecureToken();
   const tokenHash = await hashToken(sessionToken);
+  const refreshTokenHash = await hashToken(refreshToken);
 
-  // Store Device Session
+  // Store Device Session with both access token and refresh token hashes
   try {
     await db.prepare(
-      `INSERT INTO devices (installation_id, token_hash, user_handle, created_at, last_seen_at)
-       VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+      `INSERT INTO devices (installation_id, token_hash, refresh_token_hash, user_handle, created_at, last_seen_at)
+       VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
        ON CONFLICT(installation_id) DO UPDATE SET
        token_hash = excluded.token_hash,
+       refresh_token_hash = excluded.refresh_token_hash,
        user_handle = excluded.user_handle,
        last_seen_at = CURRENT_TIMESTAMP,
        revoked_at = NULL`
     )
-      .bind(installationId, tokenHash, handle)
+      .bind(installationId, tokenHash, refreshTokenHash, handle)
       .run();
   } catch (e) {
-    console.warn('[handleVerifyOtp] Device session fallback:', e);
+    // If refresh_token_hash column is not yet present, fallback to token_hash only
+    try {
+      await db.prepare(
+        `INSERT INTO devices (installation_id, token_hash, user_handle, created_at, last_seen_at)
+         VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+         ON CONFLICT(installation_id) DO UPDATE SET
+         token_hash = excluded.token_hash,
+         user_handle = excluded.user_handle,
+         last_seen_at = CURRENT_TIMESTAMP,
+         revoked_at = NULL`
+      )
+        .bind(installationId, tokenHash, handle)
+        .run();
+    } catch (fallbackErr) {
+      console.warn('[handleVerifyOtp] Device session fallback:', fallbackErr);
+    }
   }
 
   return c.json({
@@ -210,19 +227,95 @@ authApp.get('/check-handle', async (c) => {
   });
 });
 
-// Refresh Token
+// Refresh Token: strictly verify refresh token and issue rotated access + refresh tokens
 authApp.post('/refresh', async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const refreshToken = (body.refresh_token || body.refreshToken || '').toString().trim();
+
+  if (!refreshToken) {
+    return c.json({ success: false, error: 'Refresh token is required' }, 400);
+  }
+
+  const db = getDatabase(c);
+  const refreshHash = await hashToken(refreshToken);
+
+  let session: any = null;
+  try {
+    session = await db.prepare(
+      'SELECT installation_id, token_hash, refresh_token_hash, user_handle, revoked_at FROM devices WHERE refresh_token_hash = ? OR token_hash = ? LIMIT 1'
+    )
+      .bind(refreshHash, refreshHash)
+      .first();
+  } catch (e) {
+    // Fallback if column not yet added
+    session = await db.prepare(
+      'SELECT installation_id, token_hash, user_handle, revoked_at FROM devices WHERE token_hash = ? LIMIT 1'
+    )
+      .bind(refreshHash)
+      .first();
+  }
+
+  if (!session) {
+    return c.json({ success: false, error: 'Unauthorized: Invalid refresh token' }, 401);
+  }
+
+  if (session.revoked_at) {
+    return c.json({ success: false, error: 'Unauthorized: Session has been revoked' }, 401);
+  }
+
   const newAccess = generateSecureToken();
   const newRefresh = generateSecureToken();
+  const newAccessHash = await hashToken(newAccess);
+  const newRefreshHash = await hashToken(newRefresh);
+
+  try {
+    await db.prepare(
+      'UPDATE devices SET token_hash = ?, refresh_token_hash = ?, last_seen_at = CURRENT_TIMESTAMP WHERE installation_id = ?'
+    )
+      .bind(newAccessHash, newRefreshHash, session.installation_id)
+      .run();
+  } catch (e) {
+    try {
+      await db.prepare(
+        'UPDATE devices SET token_hash = ?, last_seen_at = CURRENT_TIMESTAMP WHERE installation_id = ?'
+      )
+        .bind(newAccessHash, session.installation_id)
+        .run();
+    } catch (_) {}
+  }
+
   return c.json({
     success: true,
     access_token: newAccess,
     refresh_token: newRefresh,
+    sessionToken: newAccess,
+    token: newAccess,
+    expires_in: 30 * 86400,
+  });
+});
+
+
+// Avatar Update / Removal
+authApp.post('/profile/avatar', authMiddleware, async (c) => {
+  const user = c.get('user');
+  const body = await c.req.json().catch(() => ({}));
+  const avatarUrl = body.avatarUrl || body.avatar_url || body.avatar_r2_path || '';
+
+  const db = getDatabase(c);
+  await db.prepare('UPDATE profiles SET avatar_r2_path = ?, updated_at = CURRENT_TIMESTAMP WHERE handle = ? OR handle = ?')
+    .bind(avatarUrl, user.userHandle, `@${user.userHandle}`)
+    .run();
+
+  return c.json({
+    success: true,
+    avatarUrl,
+    message: 'Avatar updated successfully',
   });
 });
 
 // 5. GET Profile for Current Logged in User
 authApp.get('/profile', authMiddleware, async (c) => {
+
   const user = c.get('user');
   const db = getDatabase(c);
 

@@ -5,11 +5,10 @@ compatibility_flags = ["nodejs_compat"]
 
 [vars]
 ENVIRONMENT = "production"
-JWT_SECRET = "MyJwtSecret2026Vadodara"
 JWT_ACCESS_EXPIRE_MINUTES = 30
 JWT_REFRESH_EXPIRE_DAYS = 30
-SERVER_SALT = "MySuperSecretCitySalt2026"
 WAKIT_BASE_URL = "https://wakit.in/api/v1"
+
 
 [[d1_databases]]
 binding = "DB"

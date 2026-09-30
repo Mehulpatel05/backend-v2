@@ -105,9 +105,11 @@ async function handleGetPosts(c: any) {
   }
 
   if (author) {
-    query += ' AND p.author_handle = ?';
-    params.push(author.startsWith('@') ? author : `@${author}`);
+    const cleanAuthor = author.replace(/^@+/, '').trim();
+    query += ' AND (p.author_handle = ? OR p.author_handle = ?)';
+    params.push(cleanAuthor, `@${cleanAuthor}`);
   }
+
 
   if (cursor) {
     query += ' AND p.created_at < ?';
@@ -400,17 +402,151 @@ async function handleAddComment(c: any) {
 
 feedApp.post('/:id/comments', authMiddleware, handleAddComment);
 feedApp.post('/posts/:id/comments', authMiddleware, handleAddComment);
+feedApp.post('/:id/comment', authMiddleware, handleAddComment);
+feedApp.post('/posts/:id/comment', authMiddleware, handleAddComment);
 
-// 6. Delete Post
+// 6. Report Post
+async function handleReportPost(c: any) {
+  const user = c.get('user');
+  const postId = c.req.param('id');
+  const body = await c.req.json().catch(() => ({}));
+  const reason = body.reason || 'spam';
+  const db = getDatabase(c);
+
+  try {
+    const post = (await db.prepare('SELECT report_count, reporters_json FROM feed_posts WHERE id = ? LIMIT 1')
+      .bind(postId)
+      .first()) as any;
+
+    if (!post) {
+      return c.json({ success: false, error: 'Post not found' }, 404);
+    }
+
+    let reporters: string[] = [];
+    try {
+      reporters = JSON.parse(post.reporters_json || '[]');
+    } catch (_) {}
+
+    if (!reporters.includes(user.userHandle)) {
+      reporters.push(user.userHandle);
+    }
+
+    const newReportCount = (post.report_count || 0) + 1;
+    const newStatus = newReportCount >= 5 ? 'flagged' : 'active';
+
+    await db.prepare('UPDATE feed_posts SET report_count = ?, reporters_json = ?, status = ? WHERE id = ?')
+      .bind(newReportCount, JSON.stringify(reporters), newStatus, postId)
+      .run();
+
+    return c.json({
+      success: true,
+      reportCount: newReportCount,
+      status: newStatus,
+      message: 'Post reported successfully',
+    });
+  } catch (e: any) {
+    return c.json({ success: false, error: e.message || 'Failed to report post' }, 500);
+  }
+}
+
+feedApp.post('/:id/report', authMiddleware, handleReportPost);
+feedApp.post('/posts/:id/report', authMiddleware, handleReportPost);
+
+// 7. Restore Post
+async function handleRestorePost(c: any) {
+  const postId = c.req.param('id');
+  const db = getDatabase(c);
+
+  await db.prepare('UPDATE feed_posts SET status = "active", report_count = 0 WHERE id = ?')
+    .bind(postId)
+    .run();
+
+  return c.json({
+    success: true,
+    message: 'Post restored successfully',
+  });
+}
+
+feedApp.post('/:id/restore', authMiddleware, handleRestorePost);
+feedApp.post('/posts/:id/restore', authMiddleware, handleRestorePost);
+
+// 8. Mark Post / Item as Sold
+async function handleMarkSold(c: any) {
+  const user = c.get('user');
+  const postId = c.req.param('id');
+  const body = await c.req.json().catch(() => ({}));
+  const isSold = body.isSold !== false && body.is_sold !== false;
+  const db = getDatabase(c);
+
+  const status = isSold ? 'sold' : 'active';
+  const res = await db.prepare(
+    'UPDATE feed_posts SET status = ? WHERE id = ? AND (author_handle = ? OR author_handle = ?)'
+  )
+    .bind(status, postId, user.userHandle, `@${user.userHandle}`)
+    .run();
+
+  return c.json({
+    success: true,
+    isSold,
+    status,
+    message: isSold ? 'Post marked as sold' : 'Post marked as active',
+  });
+}
+
+feedApp.post('/:id/sold', authMiddleware, handleMarkSold);
+feedApp.post('/posts/:id/sold', authMiddleware, handleMarkSold);
+feedApp.post('/:id/mark-sold', authMiddleware, handleMarkSold);
+
+// 9. Toggle Recommend Service
+async function handleToggleRecommend(c: any) {
+  const postId = c.req.param('id');
+  const db = getDatabase(c);
+
+  await db.prepare('UPDATE feed_posts SET upvotes = upvotes + 1 WHERE id = ?')
+    .bind(postId)
+    .run();
+
+  return c.json({
+    success: true,
+    message: 'Recommendation updated',
+  });
+}
+
+feedApp.post('/:id/recommend', authMiddleware, handleToggleRecommend);
+feedApp.post('/posts/:id/recommend', authMiddleware, handleToggleRecommend);
+
+// 10. Toggle Event RSVP
+async function handleToggleRsvp(c: any) {
+  const postId = c.req.param('id');
+  const body = await c.req.json().catch(() => ({}));
+  const isRsvped = body.isRsvped !== false;
+  const db = getDatabase(c);
+
+  const delta = isRsvped ? 1 : -1;
+  await db.prepare('UPDATE feed_posts SET upvotes = MAX(0, upvotes + ?) WHERE id = ?')
+    .bind(delta, postId)
+    .run();
+
+  return c.json({
+    success: true,
+    isRsvped,
+    message: isRsvped ? 'RSVP confirmed' : 'RSVP cancelled',
+  });
+}
+
+feedApp.post('/:id/rsvp', authMiddleware, handleToggleRsvp);
+feedApp.post('/posts/:id/rsvp', authMiddleware, handleToggleRsvp);
+
+// 11. Delete Post
 async function handleDeletePost(c: any) {
   const user = c.get('user');
   const postId = c.req.param('id');
   const db = getDatabase(c);
 
   const res = await db.prepare(
-    'DELETE FROM feed_posts WHERE id = ? AND author_handle = ?'
+    'DELETE FROM feed_posts WHERE id = ? AND (author_handle = ? OR author_handle = ?)'
   )
-    .bind(postId, user.userHandle)
+    .bind(postId, user.userHandle, `@${user.userHandle}`)
     .run();
 
   if (res.meta?.changes === 0) {
@@ -427,3 +563,4 @@ feedApp.delete('/:id', authMiddleware, handleDeletePost);
 feedApp.delete('/posts/:id', authMiddleware, handleDeletePost);
 
 export { feedApp };
+

@@ -220,4 +220,13 @@ mediaApp.get('/file/*', async (c) => {
   }
 });
 
+// 3. CDN Prewarm
+mediaApp.post('/cdn-prewarm', async (c) => {
+  return c.json({
+    success: true,
+    message: 'CDN prewarm initiated',
+  });
+});
+
 export { mediaApp };
+

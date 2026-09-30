@@ -273,6 +273,13 @@ bazarApp.post('/shops', authMiddleware, async (c) => {
   const shopId = `shop_${cleanHandle}`;
   const db = getDatabase(c);
 
+  // Ensure user exists in users table to prevent FK failure
+  try {
+    await db.prepare(
+      'INSERT OR IGNORE INTO users (id, phone, handle) VALUES (?, ?, ?)'
+    ).bind(`u_${cleanHandle}`, `user_${cleanHandle}`, cleanHandle).run();
+  } catch (_) {}
+
   await db.prepare(
     `INSERT INTO bazar_shops (
       id, owner_handle, shop_name, category, address, phone,
@@ -321,6 +328,158 @@ bazarApp.post('/shops', authMiddleware, async (c) => {
       isVerified: true,
     },
     message: 'Shop registered successfully',
+  });
+});
+
+// 5.0 Get All Active Community Shops (Marketplace Feed)
+bazarApp.get('/shops', async (c) => {
+  const { category, search, limit = '50', offset = '0' } = c.req.query();
+  const db = getDatabase(c);
+
+  let query = "SELECT * FROM bazar_shops WHERE status != 'inactive'";
+  const params: any[] = [];
+
+  if (category && category !== 'All') {
+    query += ' AND category = ?';
+    params.push(category);
+  }
+  if (search) {
+    query += ' AND (shop_name LIKE ? OR description LIKE ? OR address LIKE ?)';
+    params.push(`%${search}%`, `%${search}%`, `%${search}%`);
+  }
+
+  query += ' ORDER BY created_at DESC LIMIT ? OFFSET ?';
+  params.push(parseInt(limit), parseInt(offset));
+
+  const { results: shops } = await db.prepare(query).bind(...params).all();
+
+  const formattedShops = await Promise.all(
+    (shops || []).map(async (row: any) => {
+      const cleanOwner = (row.owner_handle || '').replace(/^@+/, '').trim();
+
+      const { results: products } = await db.prepare(
+        'SELECT * FROM bazar_listings WHERE (shop_id = ? OR seller_handle = ? OR seller_handle = ?) AND is_active = 1 ORDER BY created_at DESC LIMIT 10'
+      )
+        .bind(row.id, cleanOwner, `@${cleanOwner}`)
+        .all();
+
+      const formattedProducts = (products || []).map((p: any) => {
+        let urls: string[] = [];
+        try {
+          urls = JSON.parse(p.image_urls_json || '[]');
+        } catch (_) {}
+        const pSeller = (p.seller_handle || '').replace(/^@+/, '').trim();
+        return {
+          ...p,
+          sellerHandle: pSeller,
+          seller_handle: pSeller,
+          imageUrls: urls,
+          imageUrl: urls.length > 0 ? urls[0] : '',
+          viewsCount: p.views_count || 0,
+          chatsCount: p.chats_count || 0,
+          isSold: p.is_active === 0,
+          createdAt: p.created_at,
+        };
+      });
+
+      return {
+        id: row.id,
+        ownerHandle: cleanOwner,
+        owner_handle: cleanOwner,
+        name: row.shop_name,
+        shopName: row.shop_name,
+        shop_name: row.shop_name,
+        category: row.category,
+        categoryIcon: row.category === 'Pharmacy' ? '💊' : (row.category === 'Bakery' ? '🥐' : (row.category === 'Kirana' ? '🛒' : '🏪')),
+        location: row.address,
+        address: row.address,
+        phone: row.phone,
+        imageUrl: row.logo_r2_path || row.banner_r2_path || '',
+        bannerUrl: row.banner_r2_path || '',
+        logo_r2_path: row.logo_r2_path || '',
+        banner_r2_path: row.banner_r2_path || '',
+        description: row.description || '',
+        aboutText: row.description || '',
+        status: row.status || 'active',
+        isOpen: row.status !== 'inactive',
+        isVerified: true,
+        products: formattedProducts,
+      };
+    })
+  );
+
+  return c.json({
+    success: true,
+    shops: formattedShops,
+  });
+});
+
+// 5.01 Get Single Shop by ID
+bazarApp.get('/shops/:id', async (c) => {
+  const shopId = c.req.param('id');
+  const db = getDatabase(c);
+
+  const shop = (await db.prepare(
+    'SELECT * FROM bazar_shops WHERE id = ? LIMIT 1'
+  )
+    .bind(shopId)
+    .first()) as any;
+
+  if (!shop) {
+    return c.json({ success: false, error: 'Shop not found' }, 404);
+  }
+
+  const cleanOwner = (shop.owner_handle || '').replace(/^@+/, '').trim();
+  const { results: products } = await db.prepare(
+    'SELECT * FROM bazar_listings WHERE (shop_id = ? OR seller_handle = ? OR seller_handle = ?) AND is_active = 1 ORDER BY created_at DESC'
+  )
+    .bind(shop.id, cleanOwner, `@${cleanOwner}`)
+    .all();
+
+  const formattedProducts = (products || []).map((p: any) => {
+    let urls: string[] = [];
+    try {
+      urls = JSON.parse(p.image_urls_json || '[]');
+    } catch (_) {}
+    const pSeller = (p.seller_handle || '').replace(/^@+/, '').trim();
+    return {
+      ...p,
+      sellerHandle: pSeller,
+      seller_handle: pSeller,
+      imageUrls: urls,
+      imageUrl: urls.length > 0 ? urls[0] : '',
+      viewsCount: p.views_count || 0,
+      chatsCount: p.chats_count || 0,
+      isSold: p.is_active === 0,
+      createdAt: p.created_at,
+    };
+  });
+
+  return c.json({
+    success: true,
+    shop: {
+      id: shop.id,
+      ownerHandle: cleanOwner,
+      owner_handle: cleanOwner,
+      name: shop.shop_name,
+      shopName: shop.shop_name,
+      shop_name: shop.shop_name,
+      category: shop.category,
+      categoryIcon: shop.category === 'Pharmacy' ? '💊' : (shop.category === 'Bakery' ? '🥐' : (shop.category === 'Kirana' ? '🛒' : '🏪')),
+      location: shop.address,
+      address: shop.address,
+      phone: shop.phone,
+      imageUrl: shop.logo_r2_path || shop.banner_r2_path || '',
+      bannerUrl: shop.banner_r2_path || '',
+      logo_r2_path: shop.logo_r2_path || '',
+      banner_r2_path: shop.banner_r2_path || '',
+      description: shop.description || '',
+      aboutText: shop.description || '',
+      status: shop.status || 'active',
+      isOpen: shop.status !== 'inactive',
+      isVerified: true,
+      products: formattedProducts,
+    },
   });
 });
 
@@ -701,5 +860,82 @@ bazarApp.post('/listings/:id/chat-inquiry', authMiddleware, async (c) => {
   return c.json({ success: true, message: 'Listing chat inquiry recorded' });
 });
 
+// 9. Delete Shop
+bazarApp.delete('/shops/:id', authMiddleware, async (c) => {
+  const user = c.get('user');
+  const shopId = c.req.param('id');
+  const db = getDatabase(c);
+
+  try {
+    await db.batch([
+      db.prepare('DELETE FROM bazar_shops WHERE id = ? AND (owner_handle = ? OR owner_handle = ?)').bind(shopId, user.userHandle, `@${user.userHandle}`),
+      db.prepare('DELETE FROM bazar_listings WHERE shop_id = ?').bind(shopId),
+    ]);
+
+    return c.json({ success: true, message: 'Shop and its listings deleted successfully' });
+  } catch (e: any) {
+    return c.json({ success: false, error: e.message }, 500);
+  }
+});
+
+// 10. Toggle Save Shop
+bazarApp.post('/shops/:id/save', authMiddleware, async (c) => {
+  const user = c.get('user');
+  const shopId = c.req.param('id');
+  const db = getDatabase(c);
+
+  try {
+    const existing = await db.prepare(
+      'SELECT id FROM bazar_saved WHERE user_handle = ? AND listing_id = ? LIMIT 1'
+    )
+      .bind(user.userHandle, shopId)
+      .first();
+
+    if (existing) {
+      await db.prepare('DELETE FROM bazar_saved WHERE user_handle = ? AND listing_id = ?')
+        .bind(user.userHandle, shopId)
+        .run();
+      return c.json({ success: true, isSaved: false, message: 'Shop unsaved' });
+    } else {
+      await db.prepare('INSERT INTO bazar_saved (id, user_handle, listing_id) VALUES (?, ?, ?)')
+        .bind(`save_${Date.now()}`, user.userHandle, shopId)
+        .run();
+      return c.json({ success: true, isSaved: true, message: 'Shop saved' });
+    }
+  } catch (e: any) {
+    return c.json({ success: false, error: e.message }, 500);
+  }
+});
+
+// 11. Mark Listing / Product as Sold
+bazarApp.post('/listings/:id/sold', authMiddleware, async (c) => {
+  const user = c.get('user');
+  const listingId = c.req.param('id');
+  const body = await c.req.json().catch(() => ({}));
+  const isSold = body.isSold !== false && body.is_sold !== false;
+  const db = getDatabase(c);
+
+  const isActive = isSold ? 0 : 1;
+  const res = await db.prepare(
+    'UPDATE bazar_listings SET is_active = ? WHERE id = ? AND (seller_handle = ? OR seller_handle = ?)'
+  )
+    .bind(isActive, listingId, user.userHandle, `@${user.userHandle}`)
+    .run();
+
+  if (res.meta?.changes === 0) {
+    return c.json({ success: false, error: 'Listing not found or unauthorized' }, 404);
+  }
+
+  return c.json({
+    success: true,
+    isSold,
+    message: isSold ? 'Product marked as Sold (Out of stock)' : 'Product marked as Active (In stock)',
+  });
+});
+bazarApp.post('/products/:id/sold', authMiddleware, async (c) => {
+  return bazarApp.fetch(c.req.raw, c.env, c.executionCtx);
+});
+
 export { bazarApp };
+
 

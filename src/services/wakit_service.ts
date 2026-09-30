@@ -10,6 +10,10 @@ export interface WakitSendOtpResult {
 }
 
 export class WakitService {
+  private static get isDev(): boolean {
+    return (process.env.ENVIRONMENT === 'development' || process.env.NODE_ENV === 'development');
+  }
+
   private static get apiKey(): string {
     return (process.env.WAKIT_API_KEY || '').trim();
   }
@@ -25,18 +29,25 @@ export class WakitService {
     const cleanDigits = phoneNumber.replace(/\D/g, '');
     const e164 = cleanDigits.length === 10 ? `+91${cleanDigits}` : `+${cleanDigits}`;
 
-    // Test numbers bypass
-    const testPhones = ['+910000000000', '+919999999999', '+911234567890', '+919876543210'];
-    if (testPhones.includes(e164)) {
-      const testReqId = `test_otp_${Date.now()}`;
+    // Test numbers bypass ONLY allowed in explicit non-production development environments
+    const testPhones = ['+910000000000', '+919999999999'];
+    if (this.isDev && testPhones.includes(e164)) {
+      const testReqId = `test_otp_${Date.now()}_${Math.floor(100000 + Math.random() * 900000)}`;
       return { success: true, requestId: testReqId };
     }
 
     const apiKey = this.apiKey;
     if (!apiKey) {
-      console.warn('[WakitService] WAKIT_API_KEY is not set. Using demo fallback.');
-      const demoReqId = `demo_otp_${Date.now()}`;
-      return { success: true, requestId: demoReqId };
+      if (this.isDev) {
+        console.warn('[WakitService] WAKIT_API_KEY is not set in development mode. Using dev request ID.');
+        const devReqId = `dev_otp_${Date.now()}_${Math.floor(100000 + Math.random() * 900000)}`;
+        return { success: true, requestId: devReqId };
+      }
+      console.error('[WakitService] WAKIT_API_KEY is required in production.');
+      return {
+        success: false,
+        error: 'OTP Service is misconfigured. Please contact support.',
+      };
     }
 
     const url = `${this.baseUrl}/otp/send`;
@@ -88,20 +99,24 @@ export class WakitService {
    */
   public static async verifyOtp(requestId: string, otp: string, phoneNumber?: string): Promise<boolean> {
     const cleanOtp = otp.trim();
+    if (cleanOtp.length !== 6) {
+      return false;
+    }
 
-    // Test & Demo OTPs
-    if (
-      requestId.startsWith('test_otp_') ||
-      requestId.startsWith('demo_otp_') ||
-      cleanOtp === '123456' ||
-      cleanOtp === '000000'
-    ) {
-      return cleanOtp.length === 6;
+    const cleanPhone = phoneNumber ? (phoneNumber.replace(/\D/g, '').length === 10 ? `+91${phoneNumber.replace(/\D/g, '')}` : `+${phoneNumber.replace(/\D/g, '')}`) : '';
+
+    // Dev test numbers verification ONLY in explicit development environment
+    if (this.isDev) {
+      const devTestPhones = ['+910000000000', '+919999999999'];
+      if ((requestId.startsWith('test_otp_') || requestId.startsWith('dev_otp_')) && (devTestPhones.includes(cleanPhone) || !cleanPhone)) {
+        return cleanOtp === '123456';
+      }
     }
 
     const apiKey = this.apiKey;
     if (!apiKey) {
-      return cleanOtp.length === 6;
+      console.error('[WakitService] Cannot verify OTP without WAKIT_API_KEY in production.');
+      return false;
     }
 
     const url = `${this.baseUrl}/otp/verify`;
@@ -151,3 +166,4 @@ export class WakitService {
     return false;
   }
 }
+
