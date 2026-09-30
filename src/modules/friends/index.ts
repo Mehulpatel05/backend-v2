@@ -75,6 +75,7 @@ friendsApp.get('/discover', authMiddleware, async (c) => {
     FROM users u
     LEFT JOIN profiles pr ON LOWER(u.handle) = LOWER(pr.handle)
     WHERE LOWER(u.handle) != ? AND LOWER(u.handle) NOT LIKE 'anon#%' AND LOWER(u.handle) != 'guest'
+      AND LOWER(u.handle) NOT LIKE 'user_%'
   `;
   const params: any[] = [myHandle];
 
@@ -263,9 +264,9 @@ friendsApp.post('/request', authMiddleware, async (c) => {
             OR (LOWER(sender_handle) = ? AND LOWER(receiver_handle) = ?)`
       ).bind(target, myHandle, myHandle, target),
       db.prepare(
-        `INSERT INTO friendships (id, user1_handle, user2_handle) VALUES (?, ?, ?)
-         ON CONFLICT(user1_handle, user2_handle) DO NOTHING`
-      ).bind(friendshipId, sorted[0], sorted[1]),
+        `INSERT INTO friendships (id, user1, user2, user1_handle, user2_handle) VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO NOTHING`
+      ).bind(friendshipId, sorted[0], sorted[1], sorted[0], sorted[1]),
       db.prepare(`UPDATE profiles SET friend_count = friend_count + 1 WHERE LOWER(handle) IN (?, ?)`).bind(
         target, myHandle
       ),
@@ -367,9 +368,9 @@ friendsApp.post('/accept', authMiddleware, async (c) => {
       myHandle, otherPerson
     ),
     db.prepare(
-      `INSERT INTO friendships (id, user1_handle, user2_handle) VALUES (?, ?, ?)
-       ON CONFLICT(user1_handle, user2_handle) DO NOTHING`
-    ).bind(friendshipId, sorted[0], sorted[1]),
+      `INSERT INTO friendships (id, user1, user2, user1_handle, user2_handle) VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO NOTHING`
+    ).bind(friendshipId, sorted[0], sorted[1], sorted[0], sorted[1]),
     db.prepare(`UPDATE profiles SET friend_count = friend_count + 1 WHERE LOWER(handle) IN (?, ?)`).bind(
       otherPerson, myHandle
     ),
@@ -425,8 +426,9 @@ friendsApp.post('/request/:id/accept', authMiddleware, async (c) => {
   await db.batch([
     db.prepare('UPDATE friend_requests SET status = "accepted", updated_at = CURRENT_TIMESTAMP WHERE id = ?').bind(requestId),
     db.prepare(
-      'INSERT INTO friendships (id, user1_handle, user2_handle) VALUES (?, ?, ?) ON CONFLICT DO NOTHING'
-    ).bind(friendshipId, sorted[0], sorted[1]),
+      `INSERT INTO friendships (id, user1, user2, user1_handle, user2_handle) VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO NOTHING`
+    ).bind(friendshipId, sorted[0], sorted[1], sorted[0], sorted[1]),
     db.prepare('UPDATE profiles SET friend_count = friend_count + 1 WHERE LOWER(handle) IN (?, ?)').bind(
       sender, myHandle
     ),
