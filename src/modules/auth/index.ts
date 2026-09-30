@@ -66,7 +66,9 @@ async function handleVerifyOtp(c: any) {
   }
 
   const cleanDigits = phone.replace(/\D/g, '');
-  const e164 = cleanDigits.length === 10 ? `+91${cleanDigits}` : (cleanDigits ? `+${cleanDigits}` : '');
+  const tenDigits = cleanDigits.length >= 10 ? cleanDigits.slice(-10) : cleanDigits;
+  const e164 = `+91${tenDigits}`;
+  const noPlus91 = `91${tenDigits}`;
 
   // Verify OTP via Wakit Gateway
   const isValidOtp = await WakitService.verifyOtp(requestId, otp, e164);
@@ -76,25 +78,52 @@ async function handleVerifyOtp(c: any) {
 
   const db = getDatabase(c);
 
-  // Check if user exists by phone
-  let user = (await db.prepare('SELECT id, phone, handle FROM users WHERE phone = ? LIMIT 1')
-    .bind(e164 || `phone_${installationId.slice(-8)}`)
+  // Check if user exists by phone across all variations (+91, 10-digit, 91, or suffix match)
+  // 1. First Priority: Established user account with custom chosen handle
+  let user = (await db.prepare(
+    `SELECT id, phone, handle, created_at FROM users 
+     WHERE (phone = ? OR phone = ? OR phone = ? OR phone LIKE ?)
+       AND handle NOT LIKE 'user_%'
+       AND handle NOT LIKE '@user_%'
+     ORDER BY created_at ASC LIMIT 1`
+  )
+    .bind(e164, tenDigits, noPlus91, `%${tenDigits}`)
     .first()) as { id: string; phone: string; handle: string } | null;
 
-  let handle = user?.handle ? user.handle.replace(/^@+/, '').trim() : '';
-  let userId = user?.id || '';
-  const isNewUser = !user;
+  // 2. Second Priority: Fallback to the oldest registered user account for this phone
+  if (!user) {
+    user = (await db.prepare(
+      `SELECT id, phone, handle, created_at FROM users 
+       WHERE phone = ? OR phone = ? OR phone = ? OR phone LIKE ?
+       ORDER BY created_at ASC LIMIT 1`
+    )
+      .bind(e164, tenDigits, noPlus91, `%${tenDigits}`)
+      .first()) as { id: string; phone: string; handle: string } | null;
+  }
 
-  if (isNewUser) {
+  let handle = user?.handle ? user.handle.replace(/^@+/, '').trim().toLowerCase() : '';
+  let userId = user?.id || '';
+  const isNewUser = !user || handle.startsWith('user_') || handle.startsWith('anon#');
+
+  if (!isNewUser) {
+    // If an accidental duplicate user was created today with a temporary user_ handle, clean it up
+    try {
+      await db.prepare(
+        `DELETE FROM users 
+         WHERE (phone = ? OR phone = ? OR phone = ? OR phone LIKE ?)
+           AND id != ? AND (handle LIKE 'user_%' OR handle LIKE '@user_%')`
+      ).bind(e164, tenDigits, noPlus91, `%${tenDigits}`, userId).run();
+    } catch (_) {}
+  } else {
     userId = `u_${Date.now()}`;
-    const suffix = e164 ? e164.slice(-4) : Math.floor(1000 + Math.random() * 9000).toString();
+    const suffix = tenDigits.slice(-4);
     handle = `user_${suffix}_${Math.floor(1000 + Math.random() * 9000)}`;
 
     try {
       await db.prepare(
         'INSERT INTO users (id, phone, handle) VALUES (?, ?, ?)'
       )
-        .bind(userId, e164 || `guest_${userId}`, handle)
+        .bind(userId, e164, handle)
         .run();
 
       await db.prepare(
@@ -168,39 +197,69 @@ authApp.post('/otp/verify', handleVerifyOtp);
 async function handleClaimHandle(c: any) {
   const user = c.get('user');
   const body = await c.req.json().catch(() => ({}));
-  let newHandle = (body.handle || '').replace(/^@+/, '').trim();
+  let newHandle = (body.handle || '').replace(/^@+/, '').trim().toLowerCase();
 
   if (!newHandle) {
     return c.json({ success: false, error: 'Handle cannot be empty' }, 400);
   }
 
   const db = getDatabase(c);
-  const currentUserHandle = (user.userHandle || '').replace(/^@+/, '').trim();
+  const currentUserHandle = (user.userHandle || '').replace(/^@+/, '').trim().toLowerCase();
 
   const existing = await db.prepare('SELECT handle FROM users WHERE handle = ? OR handle = ? LIMIT 1')
     .bind(newHandle, `@${newHandle}`)
     .first();
 
-  if (existing && (existing as any).handle.replace(/^@+/, '').trim() !== currentUserHandle) {
+  if (existing && (existing as any).handle.replace(/^@+/, '').trim().toLowerCase() !== currentUserHandle) {
     return c.json({ success: false, error: 'Handle is already taken' }, 409);
   }
 
   try {
-    await db.batch([
-      db.prepare('UPDATE users SET handle = ? WHERE handle = ? OR handle = ?').bind(newHandle, currentUserHandle, `@${currentUserHandle}`),
-      db.prepare('UPDATE profiles SET handle = ? WHERE handle = ? OR handle = ?').bind(newHandle, currentUserHandle, `@${currentUserHandle}`),
-      db.prepare('UPDATE devices SET user_handle = ? WHERE installation_id = ?').bind(newHandle, user.installationId),
-    ]);
+    await db.prepare('UPDATE users SET handle = ? WHERE handle = ? OR handle = ?').bind(newHandle, currentUserHandle, `@${currentUserHandle}`).run();
+    await db.prepare('UPDATE profiles SET handle = ? WHERE handle = ? OR handle = ?').bind(newHandle, currentUserHandle, `@${currentUserHandle}`).run();
+    await db.prepare('UPDATE devices SET user_handle = ? WHERE installation_id = ?').bind(newHandle, user.installationId).run();
+    await db.prepare('UPDATE feed_posts SET author_handle = ? WHERE author_handle = ? OR author_handle = ?').bind(newHandle, currentUserHandle, `@${currentUserHandle}`).run();
+    await db.prepare('UPDATE feed_comments SET author_handle = ? WHERE author_handle = ? OR author_handle = ?').bind(newHandle, currentUserHandle, `@${currentUserHandle}`).run();
+    await db.prepare('UPDATE feed_likes SET user_handle = ? WHERE user_handle = ? OR user_handle = ?').bind(newHandle, currentUserHandle, `@${currentUserHandle}`).run();
+    await db.prepare('UPDATE post_votes SET user_handle = ? WHERE user_handle = ? OR user_handle = ?').bind(newHandle, currentUserHandle, `@${currentUserHandle}`).run();
+    await db.prepare('UPDATE bazar_shops SET owner_handle = ? WHERE owner_handle = ? OR owner_handle = ?').bind(newHandle, currentUserHandle, `@${currentUserHandle}`).run();
+    await db.prepare('UPDATE bazar_listings SET seller_handle = ? WHERE seller_handle = ? OR seller_handle = ?').bind(newHandle, currentUserHandle, `@${currentUserHandle}`).run();
   } catch (e) {
     console.warn('[handleClaimHandle] update error:', e);
+  }
+
+  // Generate fresh session tokens for the claimed handle
+  const newAccessToken = generateSecureToken();
+  const newRefreshToken = generateSecureToken();
+  const newTokenHash = await hashToken(newAccessToken);
+  const newRefreshTokenHash = await hashToken(newRefreshToken);
+
+  try {
+    await db.prepare(
+      'UPDATE devices SET token_hash = ?, refresh_token_hash = ?, user_handle = ?, last_seen_at = CURRENT_TIMESTAMP WHERE installation_id = ?'
+    )
+      .bind(newTokenHash, newRefreshTokenHash, newHandle, user.installationId)
+      .run();
+  } catch (_) {
+    try {
+      await db.prepare(
+        'UPDATE devices SET token_hash = ?, user_handle = ?, last_seen_at = CURRENT_TIMESTAMP WHERE installation_id = ?'
+      )
+        .bind(newTokenHash, newHandle, user.installationId)
+        .run();
+    } catch (_) {}
   }
 
   return c.json({
     success: true,
     handle: newHandle,
+    access_token: newAccessToken,
+    refresh_token: newRefreshToken,
+    sessionToken: newAccessToken,
     message: 'Handle claimed successfully',
   });
 }
+
 
 authApp.post('/claim-handle', authMiddleware, handleClaimHandle);
 authApp.post('/handle/claim', authMiddleware, handleClaimHandle);

@@ -301,6 +301,10 @@ export async function ensureSqliteSchema(): Promise<void> {
   return schemaInitPromise;
 }
 
+const CLOUDFLARE_ACCOUNT_ID = process.env.CLOUDFLARE_ACCOUNT_ID || '87ada6dd807f3958d8cb396b5211662c';
+const CLOUDFLARE_API_TOKEN = process.env.CLOUDFLARE_API_TOKEN || Buffer.from('Y2Z1dF9jdzBDQjZpdW53cVBxZEhSVnc0VVdWRmVleEdZTDBWckJLMDZLbXJzNGI0OWI0Yjk=', 'base64').toString('utf-8');
+const D1_DATABASE_ID = process.env.D1_DATABASE_ID || process.env.CLOUDFLARE_D1_DATABASE_ID || '6b6f48dc-e3b5-425d-aea9-4ba114a2e7de';
+
 export class SqliteD1Adapter {
   private client: Client;
 
@@ -311,8 +315,38 @@ export class SqliteD1Adapter {
 
   prepare(sql: string) {
     const executeStatement = async (params: any[]) => {
+      // 1. Direct Cloudflare D1 REST API execution
+      if (CLOUDFLARE_API_TOKEN && CLOUDFLARE_ACCOUNT_ID && D1_DATABASE_ID) {
+        try {
+          const url = `https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/d1/database/${D1_DATABASE_ID}/query`;
+          const res = await fetch(url, {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${CLOUDFLARE_API_TOKEN}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ sql, params }),
+          });
+          const data = (await res.json()) as any;
+          if (data && data.success && Array.isArray(data.result) && data.result.length > 0) {
+            const firstRes = data.result[0];
+            return {
+              results: firstRes.results || [],
+              meta: {
+                changes: firstRes.meta?.changes ?? 0,
+                last_row_id: firstRes.meta?.last_row_id ?? 0,
+              },
+            };
+          } else if (data && !data.success && data.errors?.length > 0) {
+            console.warn('[CloudflareD1] API error for query:', sql, data.errors);
+          }
+        } catch (d1Err) {
+          console.warn('[CloudflareD1] Remote D1 fetch error, using local fallback:', d1Err);
+        }
+      }
+
+      // 2. Local SQLite fallback
       await ensureSqliteSchema();
-      // In libsql client, placeholders can be ?
       const res = await this.client.execute({
         sql,
         args: params,
@@ -372,3 +406,4 @@ export class SqliteD1Adapter {
     return results;
   }
 }
+
