@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { Env, Variables } from '../../types';
 import { authMiddleware } from '../../middleware/auth';
 import { getDatabase } from '../../db/db_context';
+import { sendPushNotification } from '../../services/fcm_service';
 
 const chatApp = new Hono<{ Bindings: Env; Variables: Variables }>();
 
@@ -182,6 +183,13 @@ async function handleSendMessage(c: any) {
   // Trigger Notification to Receiver
   try {
     const notifId = `notif_${now}_${Math.floor(1000 + Math.random() * 9000)}`;
+    const payload = {
+      type: 'chat',
+      partnerHandle: myHandle,
+      senderHandle: myHandle,
+      chatId: canonicalId,
+    };
+
     await db.prepare(
       `INSERT INTO notifications (id, target_handle, sender_handle, type, title, body, data_json)
        VALUES (?, ?, ?, 'chat', ?, ?, ?)`
@@ -191,13 +199,18 @@ async function handleSendMessage(c: any) {
       myHandle,
       `@${myHandle}`,
       previewText,
-      JSON.stringify({
-        type: 'chat',
-        partnerHandle: myHandle,
-        senderHandle: myHandle,
-        chatId: canonicalId,
-      })
+      JSON.stringify(payload)
     ).run();
+
+    // Send FCM Push Notification for background/killed state
+    sendPushNotification({
+      targetHandle: receiver,
+      title: `@${myHandle}`,
+      body: previewText,
+      data: payload,
+      channelId: 'nearhood_channel',
+      db,
+    }).catch((pushErr) => console.error('[Chat FCM] Push dispatch error:', pushErr));
   } catch (_) {}
 
   return c.json({

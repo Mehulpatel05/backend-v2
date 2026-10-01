@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { Env, Variables } from '../../types';
 import { authMiddleware } from '../../middleware/auth';
 import { getDatabase } from '../../db/db_context';
+import { sendPushNotification } from '../../services/fcm_service';
 
 const friendsApp = new Hono<{ Bindings: Env; Variables: Variables }>();
 
@@ -272,6 +273,35 @@ friendsApp.post('/request', authMiddleware, async (c) => {
       ),
     ]);
 
+    // Notify target that you accepted their pending request
+    try {
+      const notifId = `notif_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`;
+      const autoPayload = {
+        type: 'chat',
+        partnerHandle: myHandle,
+        senderHandle: myHandle,
+      };
+      await db.prepare(
+        `INSERT INTO notifications (id, target_handle, sender_handle, type, title, body, data_json, is_read, created_at)
+         VALUES (?, ?, ?, 'friend_accept', 'Friend Request Accepted', ?, ?, 0, CURRENT_TIMESTAMP)`
+      ).bind(
+        notifId,
+        target,
+        myHandle,
+        `@${myHandle} accepted your friend request! Tap to start chatting.`,
+        JSON.stringify(autoPayload)
+      ).run();
+
+      sendPushNotification({
+        targetHandle: target,
+        title: 'Friend Request Accepted',
+        body: `@${myHandle} accepted your friend request! Tap to start chatting.`,
+        data: autoPayload,
+        channelId: 'nearhood_channel',
+        db,
+      }).catch((pushErr) => console.error('[Auto-Accept FCM] Push error:', pushErr));
+    } catch (_) {}
+
     return c.json({
       success: true,
       relationship: 'friends',
@@ -298,6 +328,12 @@ friendsApp.post('/request', authMiddleware, async (c) => {
   // Create notification for target user
   try {
     const notifId = `notif_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`;
+    const notifPayload = {
+      type: 'friend_request',
+      senderHandle: myHandle,
+      requestId,
+    };
+
     await db.prepare(
       `INSERT INTO notifications (id, target_handle, sender_handle, type, title, body, data_json, is_read, created_at)
        VALUES (?, ?, ?, 'friend_request', 'New Friend Request', ?, ?, 0, CURRENT_TIMESTAMP)`
@@ -306,12 +342,18 @@ friendsApp.post('/request', authMiddleware, async (c) => {
       target,
       myHandle,
       `@${myHandle} sent you a friend request`,
-      JSON.stringify({
-        type: 'friend_request',
-        senderHandle: myHandle,
-        requestId,
-      })
+      JSON.stringify(notifPayload)
     ).run();
+
+    // Send FCM Push Notification for background/killed state
+    sendPushNotification({
+      targetHandle: target,
+      title: 'New Friend Request',
+      body: `@${myHandle} sent you a friend request`,
+      data: notifPayload,
+      channelId: 'nearhood_channel',
+      db,
+    }).catch((pushErr) => console.error('[Friend Request FCM] Push error:', pushErr));
   } catch (_) {}
 
   return c.json({
@@ -379,6 +421,12 @@ friendsApp.post('/accept', authMiddleware, async (c) => {
   // Create notification for other person
   try {
     const notifId = `notif_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`;
+    const acceptPayload = {
+      type: 'chat',
+      partnerHandle: myHandle,
+      senderHandle: myHandle,
+    };
+
     await db.prepare(
       `INSERT INTO notifications (id, target_handle, sender_handle, type, title, body, data_json, is_read, created_at)
        VALUES (?, ?, ?, 'friend_accept', 'Friend Request Accepted', ?, ?, 0, CURRENT_TIMESTAMP)`
@@ -387,12 +435,18 @@ friendsApp.post('/accept', authMiddleware, async (c) => {
       otherPerson,
       myHandle,
       `@${myHandle} accepted your friend request! Tap to start chatting.`,
-      JSON.stringify({
-        type: 'chat',
-        partnerHandle: myHandle,
-        senderHandle: myHandle,
-      })
+      JSON.stringify(acceptPayload)
     ).run();
+
+    // Send FCM Push Notification for background/killed state
+    sendPushNotification({
+      targetHandle: otherPerson,
+      title: 'Friend Request Accepted',
+      body: `@${myHandle} accepted your friend request! Tap to start chatting.`,
+      data: acceptPayload,
+      channelId: 'nearhood_channel',
+      db,
+    }).catch((pushErr) => console.error('[Friend Accept FCM] Push error:', pushErr));
   } catch (_) {}
 
   return c.json({
@@ -433,6 +487,35 @@ friendsApp.post('/request/:id/accept', authMiddleware, async (c) => {
       sender, myHandle
     ),
   ]);
+
+  // Create notification for sender
+  try {
+    const notifId = `notif_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`;
+    const acceptPayload = {
+      type: 'chat',
+      partnerHandle: myHandle,
+      senderHandle: myHandle,
+    };
+    await db.prepare(
+      `INSERT INTO notifications (id, target_handle, sender_handle, type, title, body, data_json, is_read, created_at)
+       VALUES (?, ?, ?, 'friend_accept', 'Friend Request Accepted', ?, ?, 0, CURRENT_TIMESTAMP)`
+    ).bind(
+      notifId,
+      sender,
+      myHandle,
+      `@${myHandle} accepted your friend request! Tap to start chatting.`,
+      JSON.stringify(acceptPayload)
+    ).run();
+
+    sendPushNotification({
+      targetHandle: sender,
+      title: 'Friend Request Accepted',
+      body: `@${myHandle} accepted your friend request! Tap to start chatting.`,
+      data: acceptPayload,
+      channelId: 'nearhood_channel',
+      db,
+    }).catch((pushErr) => console.error('[Friend Accept ID FCM] Push error:', pushErr));
+  } catch (_) {}
 
   return c.json({
     success: true,
