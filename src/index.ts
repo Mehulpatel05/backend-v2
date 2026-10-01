@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { Env, Variables } from './types';
@@ -34,10 +35,11 @@ app.use(
 const healthHandler = async (c: any) => {
   try {
     const db = getDatabase(c);
-    const dbTest = await db.prepare('SELECT 1 as live').first();
+    const dbTest = (await db.prepare('SELECT COUNT(*) as cnt FROM users').first()) as any;
     return c.json({
       status: 'healthy',
-      database: dbTest ? 'connected' : 'offline',
+      database: dbTest !== null ? 'connected' : 'offline',
+      userCount: dbTest?.cnt ?? 0,
       r2Storage: 'configured',
       timestamp: new Date().toISOString(),
     });

@@ -1,9 +1,6 @@
+import 'dotenv/config';
 import { serve } from '@hono/node-server';
-import dotenv from 'dotenv';
 import app from './index';
-
-// Load environment variables from .env
-dotenv.config();
 
 const port = Number(process.env.PORT) || 3000;
 
