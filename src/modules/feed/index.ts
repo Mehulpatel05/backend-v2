@@ -332,16 +332,16 @@ async function handlePostVote(c: any) {
               notifId,
               authorHandle,
               likerHandle,
-              `@${likerHandle} liked your post`,
-              `Someone liked your post 👍`,
+              `Nearhood`,
+              `@${likerHandle} liked your post 👍`,
               JSON.stringify(payload)
             ).run();
 
             // FCM push to post author
             sendPushNotification({
               targetHandle: authorHandle,
-              title: `@${likerHandle} liked your post`,
-              body: `Someone liked your post 👍`,
+              title: `Nearhood`,
+              body: `@${likerHandle} liked your post 👍`,
               data: payload,
               channelId: 'nearhood_channel',
               db,
@@ -395,11 +395,11 @@ feedApp.post('/:id/like', authMiddleware, async (c) => {
         await db.prepare(
           `INSERT INTO notifications (id, target_handle, sender_handle, type, title, body, data_json, is_read, created_at)
            VALUES (?, ?, ?, 'post_like', ?, ?, ?, 0, CURRENT_TIMESTAMP)`
-        ).bind(notifId, authorHandle, likerHandle, `@${likerHandle} liked your post`, `Someone liked your post 👍`, JSON.stringify(payload)).run();
+        ).bind(notifId, authorHandle, likerHandle, `Nearhood`, `@${likerHandle} liked your post 👍`, JSON.stringify(payload)).run();
         sendPushNotification({
           targetHandle: authorHandle,
-          title: `@${likerHandle} liked your post`,
-          body: `Someone liked your post 👍`,
+          title: `Nearhood`,
+          body: `@${likerHandle} liked your post 👍`,
           data: payload,
           channelId: 'nearhood_channel',
           db,
