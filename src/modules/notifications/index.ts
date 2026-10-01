@@ -40,9 +40,12 @@ notificationsApp.get('/', async (c) => {
     .all();
 
   const formatted = (results || []).map((row: any) => {
+    // Support both data_json (chat/friends writes) and payload_json (legacy writes)
     let payload = {};
     try {
-      payload = JSON.parse(row.payload_json || '{}');
+      const fromDataJson = JSON.parse(row.data_json || '{}');
+      const fromPayloadJson = JSON.parse(row.payload_json || '{}');
+      payload = { ...fromPayloadJson, ...fromDataJson };
     } catch (_) {}
 
     return {

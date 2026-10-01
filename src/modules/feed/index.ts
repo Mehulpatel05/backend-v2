@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { Env, Variables } from '../../types';
 import { authMiddleware } from '../../middleware/auth';
 import { getDatabase } from '../../db/db_context';
+import { sendPushNotification } from '../../services/fcm_service';
 
 const feedApp = new Hono<{ Bindings: Env; Variables: Variables }>();
 
@@ -308,6 +309,47 @@ async function handlePostVote(c: any) {
           ? db.prepare('UPDATE feed_posts SET upvotes = upvotes + 1, likes_count = likes_count + 1 WHERE id = ?').bind(postId)
           : db.prepare('UPDATE feed_posts SET downvotes = downvotes + 1 WHERE id = ?').bind(postId),
       ]);
+
+      // Send like notification to post author (only for upvotes, not self-likes)
+      if (voteType === 1) {
+        try {
+          const post = (await db.prepare('SELECT author_handle FROM feed_posts WHERE id = ? LIMIT 1')
+            .bind(postId).first()) as any;
+          const authorHandle = (post?.author_handle || '').replace(/^@+/, '').trim().toLowerCase();
+          const likerHandle = cleanHandle.replace(/^@+/, '').trim().toLowerCase();
+          if (authorHandle && authorHandle !== likerHandle) {
+            const notifId = `notif_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`;
+            const payload = {
+              type: 'post_like',
+              postId,
+              senderHandle: likerHandle,
+              likerHandle,
+            };
+            await db.prepare(
+              `INSERT INTO notifications (id, target_handle, sender_handle, type, title, body, data_json, is_read, created_at)
+               VALUES (?, ?, ?, 'post_like', ?, ?, ?, 0, CURRENT_TIMESTAMP)`
+            ).bind(
+              notifId,
+              authorHandle,
+              likerHandle,
+              `@${likerHandle} liked your post`,
+              `Someone liked your post 👍`,
+              JSON.stringify(payload)
+            ).run();
+
+            // FCM push to post author
+            sendPushNotification({
+              targetHandle: authorHandle,
+              title: `@${likerHandle} liked your post`,
+              body: `Someone liked your post 👍`,
+              data: payload,
+              channelId: 'nearhood_channel',
+              db,
+            }).catch(() => {});
+          }
+        } catch (_) {}
+      }
+
       return c.json({ success: true, userVote: voteType });
     }
   }
@@ -340,6 +382,31 @@ feedApp.post('/:id/like', authMiddleware, async (c) => {
       db.prepare('INSERT INTO feed_likes (id, post_id, user_handle) VALUES (?, ?, ?) ON CONFLICT(post_id, user_handle) DO NOTHING').bind(likeId, postId, user.userHandle),
       db.prepare('UPDATE feed_posts SET likes_count = likes_count + 1, upvotes = upvotes + 1 WHERE id = ?').bind(postId),
     ]);
+
+    // Notify post author about the like
+    try {
+      const post = (await db.prepare('SELECT author_handle FROM feed_posts WHERE id = ? LIMIT 1')
+        .bind(postId).first()) as any;
+      const authorHandle = (post?.author_handle || '').replace(/^@+/, '').trim().toLowerCase();
+      const likerHandle = user.userHandle.replace(/^@+/, '').trim().toLowerCase();
+      if (authorHandle && authorHandle !== likerHandle) {
+        const notifId = `notif_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`;
+        const payload = { type: 'post_like', postId, senderHandle: likerHandle, likerHandle };
+        await db.prepare(
+          `INSERT INTO notifications (id, target_handle, sender_handle, type, title, body, data_json, is_read, created_at)
+           VALUES (?, ?, ?, 'post_like', ?, ?, ?, 0, CURRENT_TIMESTAMP)`
+        ).bind(notifId, authorHandle, likerHandle, `@${likerHandle} liked your post`, `Someone liked your post 👍`, JSON.stringify(payload)).run();
+        sendPushNotification({
+          targetHandle: authorHandle,
+          title: `@${likerHandle} liked your post`,
+          body: `Someone liked your post 👍`,
+          data: payload,
+          channelId: 'nearhood_channel',
+          db,
+        }).catch(() => {});
+      }
+    } catch (_) {}
+
     return c.json({ success: true, isLiked: true, message: 'Post liked' });
   }
 });
