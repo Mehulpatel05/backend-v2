@@ -26,12 +26,14 @@ function getS3Client() {
 // Always return backend proxy URL — R2 bucket is private (not public)
 // Backend proxies the file from R2 with its own credentials
 function getProxyUrl(c: any, r2Path: string): string {
-  const rawHost = c.req.header('host') || 'backend-v2-cu1p.onrender.com';
-  // Strip port for production (Render uses standard 443)
+  const rawHost = c.req.header('host') || '3.109.213.23';
   const host = rawHost.replace(/:\d+$/, '');
-  const protocol = c.req.header('x-forwarded-proto') || 'https';
-  return `${protocol}://${host}/api/v2/media/file/${r2Path}`;
+  const isIp = /^(?:\d{1,3}\.){3}\d{1,3}$/.test(host);
+  const protoHeader = c.req.header('x-forwarded-proto');
+  const protocol = protoHeader ? protoHeader : (isIp ? 'http' : 'https');
+  return `${protocol}://${rawHost}/api/v2/media/file/${r2Path}`;
 }
+
 
 // 1. Direct Multipart/Binary Media Upload into User-Dedicated R2 Folder
 // Uses authMiddleware so we always get the real user handle from D1
