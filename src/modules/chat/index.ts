@@ -183,7 +183,7 @@ async function handleSendMessage(c: any) {
   try {
     const notifId = `notif_${now}_${Math.floor(1000 + Math.random() * 9000)}`;
     await db.prepare(
-      `INSERT INTO notifications (id, target_handle, sender_handle, type, title, body, payload_json)
+      `INSERT INTO notifications (id, target_handle, sender_handle, type, title, body, data_json)
        VALUES (?, ?, ?, 'chat', ?, ?, ?)`
     ).bind(
       notifId,
