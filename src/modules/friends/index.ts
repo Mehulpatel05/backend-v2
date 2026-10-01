@@ -299,7 +299,7 @@ friendsApp.post('/request', authMiddleware, async (c) => {
   try {
     const notifId = `notif_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`;
     await db.prepare(
-      `INSERT INTO notifications (id, target_handle, sender_handle, type, title, body, payload_json, is_read, created_at)
+      `INSERT INTO notifications (id, target_handle, sender_handle, type, title, body, data_json, is_read, created_at)
        VALUES (?, ?, ?, 'friend_request', 'New Friend Request', ?, ?, 0, CURRENT_TIMESTAMP)`
     ).bind(
       notifId,
@@ -380,7 +380,7 @@ friendsApp.post('/accept', authMiddleware, async (c) => {
   try {
     const notifId = `notif_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`;
     await db.prepare(
-      `INSERT INTO notifications (id, target_handle, sender_handle, type, title, body, payload_json, is_read, created_at)
+      `INSERT INTO notifications (id, target_handle, sender_handle, type, title, body, data_json, is_read, created_at)
        VALUES (?, ?, ?, 'friend_accept', 'Friend Request Accepted', ?, ?, 0, CURRENT_TIMESTAMP)`
     ).bind(
       notifId,
