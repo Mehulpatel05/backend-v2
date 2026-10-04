@@ -9,24 +9,31 @@ const bazarApp = new Hono<{ Bindings: Env; Variables: Variables }>();
 bazarApp.get('/listings', async (c) => {
   const { category, search, seller, limit = '50', offset = '0' } = c.req.query();
 
-  let query = 'SELECT * FROM bazar_listings WHERE is_active = 1';
+  let query = `
+    SELECT b.*,
+      COALESCE(pr.display_name, b.seller_handle) AS seller_display_name,
+      COALESCE(pr.avatar_r2_path, '') AS seller_avatar_url
+    FROM bazar_listings b
+    LEFT JOIN profiles pr ON LOWER(b.seller_handle) = LOWER(pr.handle)
+    WHERE b.is_active = 1
+  `;
   const params: any[] = [];
 
   if (category && category !== 'All') {
-    query += ' AND category = ?';
+    query += ' AND b.category = ?';
     params.push(category);
   }
   if (seller) {
     const cleanSeller = seller.replace(/^@+/, '').trim();
-    query += ' AND (seller_handle = ? OR seller_handle = ?)';
+    query += ' AND (b.seller_handle = ? OR b.seller_handle = ?)';
     params.push(cleanSeller, `@${cleanSeller}`);
   }
   if (search) {
-    query += ' AND (title LIKE ? OR description LIKE ?)';
+    query += ' AND (b.title LIKE ? OR b.description LIKE ?)';
     params.push(`%${search}%`, `%${search}%`);
   }
 
-  query += ' ORDER BY created_at DESC LIMIT ? OFFSET ?';
+  query += ' ORDER BY b.created_at DESC LIMIT ? OFFSET ?';
   params.push(parseInt(limit), parseInt(offset));
 
   const db = getDatabase(c);
@@ -38,12 +45,17 @@ bazarApp.get('/listings', async (c) => {
       urls = JSON.parse(row.image_urls_json || '[]');
     } catch (_) {}
     const cleanSeller = (row.seller_handle || '').replace(/^@+/, '').trim();
+    const sellerDisplayName = (row.seller_display_name || cleanSeller).replace(/^@+/, '').trim();
     return {
       ...row,
       imageUrls: urls,
       imageUrl: urls.length > 0 ? urls[0] : '',
       sellerHandle: cleanSeller,
       seller_handle: cleanSeller,
+      sellerName: sellerDisplayName,
+      sellerDisplayName: sellerDisplayName,
+      seller_display_name: sellerDisplayName,
+      sellerAvatarUrl: row.seller_avatar_url || '',
       viewsCount: row.views_count || 0,
       chatsCount: row.chats_count || 0,
       isSold: row.is_active === 0,
@@ -283,8 +295,8 @@ bazarApp.post('/shops', authMiddleware, async (c) => {
   await db.prepare(
     `INSERT INTO bazar_shops (
       id, owner_handle, shop_name, category, address, phone,
-      banner_r2_path, logo_r2_path, description
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      banner_r2_path, logo_r2_path, description, status
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
     ON CONFLICT(id) DO UPDATE SET
       shop_name = excluded.shop_name,
       category = excluded.category,
@@ -336,7 +348,7 @@ bazarApp.get('/shops', async (c) => {
   const { category, search, limit = '50', offset = '0' } = c.req.query();
   const db = getDatabase(c);
 
-  let query = "SELECT * FROM bazar_shops WHERE status != 'inactive'";
+  let query = "SELECT * FROM bazar_shops WHERE status = 'active'";
   const params: any[] = [];
 
   if (category && category !== 'All') {

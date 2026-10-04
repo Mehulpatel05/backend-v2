@@ -19,11 +19,15 @@ profileApp.get('/:handle', async (c) => {
     return c.json({ success: false, error: 'Profile not found' }, 404);
   }
 
+  const isVerified = (profile.is_verified === 1) || (profile.bio && profile.bio.includes('[Verified]')) ? 1 : 0;
+
   return c.json({
     success: true,
     profile: {
       ...profile,
       handle: profile.handle.replace(/^@+/, '').trim(),
+      isVerified: isVerified === 1,
+      is_verified: isVerified,
     },
   });
 });

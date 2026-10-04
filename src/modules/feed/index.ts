@@ -74,6 +74,8 @@ function formatPostRow(row: any, userVote: number = 0) {
     servicePrice: row.service_price || null,
     audioUrl: row.audio_url || '',
     displayName: row.display_name || row.author_handle,
+    authorName: row.display_name || row.author_handle,
+    author_name: row.display_name || row.author_handle,
     avatarUrl: row.avatar_r2_path || null,
   };
 }
@@ -391,7 +393,7 @@ feedApp.post('/:id/like', authMiddleware, async (c) => {
       const likerHandle = user.userHandle.replace(/^@+/, '').trim().toLowerCase();
       if (authorHandle && authorHandle !== likerHandle) {
         const notifId = `notif_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`;
-        const payload = { type: 'post_like', postId, senderHandle: likerHandle, likerHandle };
+        const payload = { type: 'post_like', postId: postId || '', senderHandle: likerHandle, likerHandle };
         await db.prepare(
           `INSERT INTO notifications (id, target_handle, sender_handle, type, title, body, data_json, is_read, created_at)
            VALUES (?, ?, ?, 'post_like', ?, ?, ?, 0, CURRENT_TIMESTAMP)`

@@ -14,6 +14,7 @@ import { actionsApp } from './modules/actions';
 import { presenceApp } from './modules/presence';
 import { preferencesApp } from './modules/preferences';
 import { feedbackApp } from './modules/feedback';
+import { adminApp } from './modules/admin';
 import { authMiddleware } from './middleware/auth';
 import { getDatabase } from './db/db_context';
 
@@ -25,7 +26,7 @@ app.use(
   cors({
     origin: '*',
     allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-    allowHeaders: ['Content-Type', 'Authorization', 'x-installation-id'],
+    allowHeaders: ['Content-Type', 'Authorization', 'x-installation-id', 'x-admin-key', 'X-Admin-Key'],
     exposeHeaders: ['Content-Length'],
     maxAge: 86400,
   })
@@ -121,6 +122,9 @@ app.route('/preferences', preferencesApp);
 
 app.route('/api/v2/feedback', feedbackApp);
 app.route('/feedback', feedbackApp);
+
+app.route('/api/v2/admin', adminApp);
+app.route('/admin', adminApp);
 
 // 5. Central 404 & Error Handler
 app.notFound((c) => {

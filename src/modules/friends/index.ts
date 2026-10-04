@@ -276,11 +276,25 @@ friendsApp.post('/request', authMiddleware, async (c) => {
     // Notify target that you accepted their pending request
     try {
       const notifId = `notif_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`;
+
+      let accepterDisplayName = '';
+      try {
+        const accepterProfile = (await db.prepare('SELECT display_name FROM profiles WHERE handle = ? OR handle = ? LIMIT 1')
+          .bind(myHandle, `@${myHandle}`)
+          .first()) as any;
+        accepterDisplayName = (accepterProfile?.display_name || '').trim();
+      } catch (_) {}
+
+      const accepterDisplay = accepterDisplayName ? `${accepterDisplayName} (@${myHandle})` : `@${myHandle}`;
+      const acceptBody = `${accepterDisplay} accepted your friend request! Tap to start chatting.`;
       const autoPayload = {
         type: 'chat',
         partnerHandle: myHandle,
         senderHandle: myHandle,
+        senderName: accepterDisplayName || myHandle,
+        senderDisplayName: accepterDisplayName || myHandle,
       };
+
       await db.prepare(
         `INSERT INTO notifications (id, target_handle, sender_handle, type, title, body, data_json, is_read, created_at)
          VALUES (?, ?, ?, 'friend_accept', 'Friend Request Accepted', ?, ?, 0, CURRENT_TIMESTAMP)`
@@ -288,14 +302,14 @@ friendsApp.post('/request', authMiddleware, async (c) => {
         notifId,
         target,
         myHandle,
-        `@${myHandle} accepted your friend request! Tap to start chatting.`,
+        acceptBody,
         JSON.stringify(autoPayload)
       ).run();
 
       sendPushNotification({
         targetHandle: target,
         title: 'Friend Request Accepted',
-        body: `@${myHandle} accepted your friend request! Tap to start chatting.`,
+        body: acceptBody,
         data: autoPayload,
         channelId: 'nearhood_channel',
         db,
@@ -328,9 +342,22 @@ friendsApp.post('/request', authMiddleware, async (c) => {
   // Create notification for target user
   try {
     const notifId = `notif_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`;
+
+    let senderDisplayName = '';
+    try {
+      const senderProfile = (await db.prepare('SELECT display_name FROM profiles WHERE handle = ? OR handle = ? LIMIT 1')
+        .bind(myHandle, `@${myHandle}`)
+        .first()) as any;
+      senderDisplayName = (senderProfile?.display_name || '').trim();
+    } catch (_) {}
+
+    const senderDisplay = senderDisplayName ? `${senderDisplayName} (@${myHandle})` : `@${myHandle}`;
+    const notifBody = `${senderDisplay} sent you a friend request`;
     const notifPayload = {
       type: 'friend_request',
       senderHandle: myHandle,
+      senderName: senderDisplayName || myHandle,
+      senderDisplayName: senderDisplayName || myHandle,
       requestId,
     };
 
@@ -341,7 +368,7 @@ friendsApp.post('/request', authMiddleware, async (c) => {
       notifId,
       target,
       myHandle,
-      `@${myHandle} sent you a friend request`,
+      notifBody,
       JSON.stringify(notifPayload)
     ).run();
 
@@ -349,7 +376,7 @@ friendsApp.post('/request', authMiddleware, async (c) => {
     sendPushNotification({
       targetHandle: target,
       title: 'New Friend Request',
-      body: `@${myHandle} sent you a friend request`,
+      body: notifBody,
       data: notifPayload,
       channelId: 'nearhood_channel',
       db,
@@ -421,10 +448,23 @@ friendsApp.post('/accept', authMiddleware, async (c) => {
   // Create notification for other person
   try {
     const notifId = `notif_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`;
+
+    let accepterDisplayName = '';
+    try {
+      const accepterProfile = (await db.prepare('SELECT display_name FROM profiles WHERE handle = ? OR handle = ? LIMIT 1')
+        .bind(myHandle, `@${myHandle}`)
+        .first()) as any;
+      accepterDisplayName = (accepterProfile?.display_name || '').trim();
+    } catch (_) {}
+
+    const accepterDisplay = accepterDisplayName ? `${accepterDisplayName} (@${myHandle})` : `@${myHandle}`;
+    const acceptBody = `${accepterDisplay} accepted your friend request! Tap to start chatting.`;
     const acceptPayload = {
       type: 'chat',
       partnerHandle: myHandle,
       senderHandle: myHandle,
+      senderName: accepterDisplayName || myHandle,
+      senderDisplayName: accepterDisplayName || myHandle,
     };
 
     await db.prepare(
@@ -434,7 +474,7 @@ friendsApp.post('/accept', authMiddleware, async (c) => {
       notifId,
       otherPerson,
       myHandle,
-      `@${myHandle} accepted your friend request! Tap to start chatting.`,
+      acceptBody,
       JSON.stringify(acceptPayload)
     ).run();
 
@@ -442,7 +482,7 @@ friendsApp.post('/accept', authMiddleware, async (c) => {
     sendPushNotification({
       targetHandle: otherPerson,
       title: 'Friend Request Accepted',
-      body: `@${myHandle} accepted your friend request! Tap to start chatting.`,
+      body: acceptBody,
       data: acceptPayload,
       channelId: 'nearhood_channel',
       db,
@@ -491,10 +531,23 @@ friendsApp.post('/request/:id/accept', authMiddleware, async (c) => {
   // Create notification for sender
   try {
     const notifId = `notif_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`;
+
+    let accepterDisplayName = '';
+    try {
+      const accepterProfile = (await db.prepare('SELECT display_name FROM profiles WHERE handle = ? OR handle = ? LIMIT 1')
+        .bind(myHandle, `@${myHandle}`)
+        .first()) as any;
+      accepterDisplayName = (accepterProfile?.display_name || '').trim();
+    } catch (_) {}
+
+    const accepterDisplay = accepterDisplayName ? `${accepterDisplayName} (@${myHandle})` : `@${myHandle}`;
+    const acceptBody = `${accepterDisplay} accepted your friend request! Tap to start chatting.`;
     const acceptPayload = {
       type: 'chat',
       partnerHandle: myHandle,
       senderHandle: myHandle,
+      senderName: accepterDisplayName || myHandle,
+      senderDisplayName: accepterDisplayName || myHandle,
     };
     await db.prepare(
       `INSERT INTO notifications (id, target_handle, sender_handle, type, title, body, data_json, is_read, created_at)
@@ -503,14 +556,14 @@ friendsApp.post('/request/:id/accept', authMiddleware, async (c) => {
       notifId,
       sender,
       myHandle,
-      `@${myHandle} accepted your friend request! Tap to start chatting.`,
+      acceptBody,
       JSON.stringify(acceptPayload)
     ).run();
 
     sendPushNotification({
       targetHandle: sender,
       title: 'Friend Request Accepted',
-      body: `@${myHandle} accepted your friend request! Tap to start chatting.`,
+      body: acceptBody,
       data: acceptPayload,
       channelId: 'nearhood_channel',
       db,
@@ -629,24 +682,36 @@ friendsApp.get('/requests', authMiddleware, async (c) => {
 
   return c.json({
     success: true,
-    received: (received || []).map((row: any) => ({
-      id: row.id,
-      senderHandle: (row.sender_handle || '').replace(/^@+/, ''),
-      receiverHandle: myHandle,
-      displayName: row.display_name || row.sender_handle,
-      avatarUrl: row.avatar_r2_path || '',
-      bio: row.bio || '',
-      createdAt: row.created_at,
-    })),
-    sent: (sent || []).map((row: any) => ({
-      id: row.id,
-      senderHandle: myHandle,
-      receiverHandle: (row.receiver_handle || '').replace(/^@+/, ''),
-      displayName: row.display_name || row.receiver_handle,
-      avatarUrl: row.avatar_r2_path || '',
-      bio: row.bio || '',
-      createdAt: row.created_at,
-    })),
+    received: (received || []).map((row: any) => {
+      const dName = (row.display_name || row.sender_handle || '').replace(/^@+/, '').trim();
+      return {
+        id: row.id,
+        senderHandle: (row.sender_handle || '').replace(/^@+/, ''),
+        receiverHandle: myHandle,
+        displayName: dName,
+        senderName: dName,
+        senderDisplayName: dName,
+        avatarUrl: row.avatar_r2_path || '',
+        senderAvatarUrl: row.avatar_r2_path || '',
+        bio: row.bio || '',
+        createdAt: row.created_at,
+      };
+    }),
+    sent: (sent || []).map((row: any) => {
+      const dName = (row.display_name || row.receiver_handle || '').replace(/^@+/, '').trim();
+      return {
+        id: row.id,
+        senderHandle: myHandle,
+        receiverHandle: (row.receiver_handle || '').replace(/^@+/, ''),
+        displayName: dName,
+        receiverName: dName,
+        receiverDisplayName: dName,
+        avatarUrl: row.avatar_r2_path || '',
+        receiverAvatarUrl: row.avatar_r2_path || '',
+        bio: row.bio || '',
+        createdAt: row.created_at,
+      };
+    }),
   });
 });
 

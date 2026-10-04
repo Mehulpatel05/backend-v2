@@ -198,6 +198,8 @@ async function handleClaimHandle(c: any) {
   const user = c.get('user');
   const body = await c.req.json().catch(() => ({}));
   let newHandle = (body.handle || '').replace(/^@+/, '').trim().toLowerCase();
+  const rawDisplayName = body.displayName ?? body.display_name ?? body.name ?? '';
+  const newDisplayName = rawDisplayName.toString().trim();
 
   if (!newHandle) {
     return c.json({ success: false, error: 'Handle cannot be empty' }, 400);
@@ -216,7 +218,15 @@ async function handleClaimHandle(c: any) {
 
   try {
     await db.prepare('UPDATE users SET handle = ? WHERE handle = ? OR handle = ?').bind(newHandle, currentUserHandle, `@${currentUserHandle}`).run();
-    await db.prepare('UPDATE profiles SET handle = ? WHERE handle = ? OR handle = ?').bind(newHandle, currentUserHandle, `@${currentUserHandle}`).run();
+
+    if (newDisplayName) {
+      await db.prepare('UPDATE profiles SET handle = ?, display_name = ?, updated_at = CURRENT_TIMESTAMP WHERE handle = ? OR handle = ?')
+        .bind(newHandle, newDisplayName, currentUserHandle, `@${currentUserHandle}`).run();
+    } else {
+      await db.prepare('UPDATE profiles SET handle = ?, updated_at = CURRENT_TIMESTAMP WHERE handle = ? OR handle = ?')
+        .bind(newHandle, currentUserHandle, `@${currentUserHandle}`).run();
+    }
+
     await db.prepare('UPDATE devices SET user_handle = ? WHERE installation_id = ?').bind(newHandle, user.installationId).run();
     await db.prepare('UPDATE feed_posts SET author_handle = ? WHERE author_handle = ? OR author_handle = ?').bind(newHandle, currentUserHandle, `@${currentUserHandle}`).run();
     await db.prepare('UPDATE feed_comments SET author_handle = ? WHERE author_handle = ? OR author_handle = ?').bind(newHandle, currentUserHandle, `@${currentUserHandle}`).run();
@@ -253,9 +263,18 @@ async function handleClaimHandle(c: any) {
   return c.json({
     success: true,
     handle: newHandle,
+    name: newDisplayName || newHandle,
+    displayName: newDisplayName || newHandle,
+    display_name: newDisplayName || newHandle,
     access_token: newAccessToken,
     refresh_token: newRefreshToken,
     sessionToken: newAccessToken,
+    user: {
+      handle: newHandle,
+      name: newDisplayName || newHandle,
+      displayName: newDisplayName || newHandle,
+      display_name: newDisplayName || newHandle,
+    },
     message: 'Handle claimed successfully',
   });
 }
@@ -386,15 +405,21 @@ authApp.get('/profile', authMiddleware, async (c) => {
     .bind(user.userHandle, `@${user.userHandle}`)
     .first()) as any;
 
+  const isVerified = (profile?.is_verified === 1) || (u?.is_verified === 1) || (profile?.bio && profile.bio.includes('[Verified]')) ? 1 : 0;
+
   return c.json({
     success: true,
     user: {
       userId: u?.id || '',
       phoneNumber: u?.phone || '',
       handle: user.userHandle.replace(/^@+/, ''),
+      name: profile?.display_name || user.userHandle.replace(/^@+/, ''),
       displayName: profile?.display_name || user.userHandle.replace(/^@+/, ''),
+      display_name: profile?.display_name || user.userHandle.replace(/^@+/, ''),
       avatarUrl: profile?.avatar_r2_path || '',
       bio: profile?.bio || '',
+      isVerified: isVerified === 1,
+      is_verified: isVerified,
       friendCount: profile?.friend_count || 0,
     },
   });
@@ -410,7 +435,7 @@ authApp.get('/profile/:handle', async (c) => {
     .bind(handle, `@${handle}`)
     .first()) as any;
 
-  const u = (await db.prepare('SELECT id, handle, phone FROM users WHERE handle = ? OR handle = ? LIMIT 1')
+  const u = (await db.prepare('SELECT id, handle, phone, is_verified FROM users WHERE handle = ? OR handle = ? LIMIT 1')
     .bind(handle, `@${handle}`)
     .first()) as any;
 
@@ -419,27 +444,39 @@ authApp.get('/profile/:handle', async (c) => {
       success: true,
       user: {
         handle: handle,
+        name: handle,
         displayName: handle,
+        display_name: handle,
         avatarUrl: '',
         bio: '',
+        isVerified: false,
+        is_verified: 0,
         friendCount: 0,
       }
     });
   }
+
+  const isVerified = (profile?.is_verified === 1) || (u?.is_verified === 1) || (profile?.bio && profile.bio.includes('[Verified]')) ? 1 : 0;
 
   return c.json({
     success: true,
     user: {
       userId: u?.id || '',
       handle: handle,
+      name: profile?.display_name || handle,
       displayName: profile?.display_name || handle,
+      display_name: profile?.display_name || handle,
       avatarUrl: profile?.avatar_r2_path || '',
       bio: profile?.bio || '',
+      isVerified: isVerified === 1,
+      is_verified: isVerified,
       friendCount: profile?.friend_count || 0,
     },
     profile: profile ? {
       ...profile,
       handle: handle,
+      isVerified: isVerified === 1,
+      is_verified: isVerified,
     } : null,
   });
 });

@@ -20,11 +20,20 @@ chatApp.get('/', authMiddleware, async (c) => {
   const db = getDatabase(c);
 
   const { results } = await db.prepare(
-    `SELECT * FROM chats
-     WHERE LOWER(user1_handle) = ? OR LOWER(user2_handle) = ?
-     ORDER BY last_timestamp DESC`
+    `SELECT c.*,
+       COALESCE(pr.display_name, CASE WHEN LOWER(c.user1_handle) = ? THEN c.user2_handle ELSE c.user1_handle END) AS other_display_name,
+       COALESCE(pr.avatar_r2_path, '') AS other_avatar_r2_path
+     FROM chats c
+     LEFT JOIN profiles pr ON LOWER(
+       CASE 
+         WHEN LOWER(c.user1_handle) = ? THEN c.user2_handle 
+         ELSE c.user1_handle 
+       END
+     ) = LOWER(pr.handle)
+     WHERE LOWER(c.user1_handle) = ? OR LOWER(c.user2_handle) = ?
+     ORDER BY c.last_timestamp DESC`
   )
-    .bind(myHandle, myHandle)
+    .bind(myHandle, myHandle, myHandle, myHandle)
     .all();
 
   const formatted = (results || []).map((row: any) => {
@@ -32,6 +41,7 @@ chatApp.get('/', authMiddleware, async (c) => {
     const u2 = (row.user2_handle || '').replace(/^@+/, '').trim();
     const isUser1 = u1.toLowerCase() === myHandle;
     const otherUser = isUser1 ? u2 : u1;
+    const otherDisplayName = (row.other_display_name || otherUser).replace(/^@+/, '').trim();
     const unreadCount = isUser1 ? row.unread_count_user1 : row.unread_count_user2;
 
     return {
@@ -39,6 +49,13 @@ chatApp.get('/', authMiddleware, async (c) => {
       chatId: row.canonical_id || row.id,
       canonicalId: row.canonical_id || row.id,
       otherUserHandle: otherUser,
+      displayName: otherDisplayName,
+      otherUserDisplayName: otherDisplayName,
+      partnerDisplayName: otherDisplayName,
+      partnerName: otherDisplayName,
+      name: otherDisplayName,
+      avatarUrl: row.other_avatar_r2_path || '',
+      partnerAvatarUrl: row.other_avatar_r2_path || '',
       lastMessage: row.last_message || '',
       lastMessageType: row.last_message_type || 'text',
       lastTimestamp: row.last_timestamp || Date.now(),
@@ -183,10 +200,22 @@ async function handleSendMessage(c: any) {
   // Trigger Notification to Receiver
   try {
     const notifId = `notif_${now}_${Math.floor(1000 + Math.random() * 9000)}`;
+
+    let senderDisplayName = '';
+    try {
+      const senderProfile = (await db.prepare('SELECT display_name FROM profiles WHERE handle = ? OR handle = ? LIMIT 1')
+        .bind(myHandle, `@${myHandle}`)
+        .first()) as any;
+      senderDisplayName = (senderProfile?.display_name || '').trim();
+    } catch (_) {}
+
+    const notifTitle = senderDisplayName ? `${senderDisplayName} (@${myHandle})` : `@${myHandle}`;
     const payload = {
       type: 'chat',
       partnerHandle: myHandle,
       senderHandle: myHandle,
+      senderName: senderDisplayName || myHandle,
+      senderDisplayName: senderDisplayName || myHandle,
       chatId: canonicalId,
     };
 
@@ -197,7 +226,7 @@ async function handleSendMessage(c: any) {
       notifId,
       receiver,
       myHandle,
-      `@${myHandle}`,
+      notifTitle,
       previewText,
       JSON.stringify(payload)
     ).run();
@@ -205,7 +234,7 @@ async function handleSendMessage(c: any) {
     // Send FCM Push Notification for background/killed state
     sendPushNotification({
       targetHandle: receiver,
-      title: `@${myHandle}`,
+      title: notifTitle,
       body: previewText,
       data: payload,
       channelId: 'nearhood_channel',
