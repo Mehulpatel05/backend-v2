@@ -25,8 +25,16 @@ export class Fast2SmsService {
     return (process.env.FAST2SMS_BASE_URL || 'https://www.fast2sms.com/dev/bulkV2').trim();
   }
 
+  public static get senderId(): string {
+    return (process.env.FAST2SMS_SENDER_ID || '').trim();
+  }
+
+  public static get templateId(): string {
+    return (process.env.FAST2SMS_TEMPLATE_ID || process.env.FAST2SMS_MESSAGE_ID || '').trim();
+  }
+
   private static get route(): string {
-    return (process.env.FAST2SMS_ROUTE || 'otp').trim().toLowerCase();
+    return (process.env.FAST2SMS_ROUTE || 'dlt').trim().toLowerCase();
   }
 
   public static isConfigured(): boolean {
@@ -65,19 +73,33 @@ export class Fast2SmsService {
 
     // Build payload according to selected route
     let payload: any;
-    if (this.route === 'q') {
+    if (this.route === 'dlt') {
+      if (!this.senderId || !this.templateId) {
+        console.error('[Fast2SmsService] FAST2SMS_SENDER_ID and FAST2SMS_TEMPLATE_ID are required for DLT route.');
+        return {
+          success: false,
+          error: 'DLT SMS configuration missing: FAST2SMS_SENDER_ID and FAST2SMS_TEMPLATE_ID are required.',
+        };
+      }
+      payload = {
+        route: 'dlt',
+        sender_id: this.senderId,
+        message: this.templateId,
+        variables_values: otpCode,
+        numbers: tenDigits,
+      };
+    } else if (this.route === 'otp') {
+      payload = {
+        route: 'otp',
+        variables_values: otpCode,
+        numbers: tenDigits,
+      };
+    } else {
       payload = {
         route: 'q',
         message: `Your Nearhood verification code is ${otpCode}. Valid for 5 minutes. Do not share this OTP with anyone.`,
         language: 'english',
         flash: 0,
-        numbers: tenDigits,
-      };
-    } else {
-      // Default: Fast2SMS quick pre-approved OTP route
-      payload = {
-        route: 'otp',
-        variables_values: otpCode,
         numbers: tenDigits,
       };
     }
