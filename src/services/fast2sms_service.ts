@@ -34,7 +34,7 @@ export class Fast2SmsService {
   }
 
   private static get route(): string {
-    return (process.env.FAST2SMS_ROUTE || 'dlt').trim().toLowerCase();
+    return (process.env.FAST2SMS_ROUTE || 'q').trim().toLowerCase();
   }
 
   public static isConfigured(): boolean {

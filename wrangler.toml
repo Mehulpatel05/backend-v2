@@ -7,7 +7,7 @@ compatibility_flags = ["nodejs_compat"]
 ENVIRONMENT = "production"
 JWT_ACCESS_EXPIRE_MINUTES = 30
 JWT_REFRESH_EXPIRE_DAYS = 30
-FAST2SMS_ROUTE = "dlt"
+FAST2SMS_ROUTE = "q"
 FAST2SMS_BASE_URL = "https://www.fast2sms.com/dev/bulkV2"
 
 
