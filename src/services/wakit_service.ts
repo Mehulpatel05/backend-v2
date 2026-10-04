@@ -18,6 +18,10 @@ export class WakitService {
     return (process.env.WAKIT_API_KEY || '').trim();
   }
 
+  public static isConfigured(): boolean {
+    return (process.env.WAKIT_API_KEY || '').trim().length > 0;
+  }
+
   private static get baseUrl(): string {
     return (process.env.WAKIT_BASE_URL || 'https://wakit.in/api/v1').replace(/\/+$/, '');
   }

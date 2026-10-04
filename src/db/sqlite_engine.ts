@@ -281,6 +281,17 @@ CREATE TABLE IF NOT EXISTS notifications (
 );
 
 CREATE INDEX IF NOT EXISTS idx_notifications_target ON notifications(target_handle, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS phone_otps (
+    phone TEXT PRIMARY KEY,
+    otp_code TEXT NOT NULL,
+    request_id TEXT NOT NULL,
+    attempts INTEGER DEFAULT 0,
+    expires_at TIMESTAMP NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_phone_otps_req ON phone_otps(request_id);
 `;
 
 let schemaInitPromise: Promise<void> | null = null;
