@@ -54,13 +54,15 @@ async function handleSendOtp(c: any) {
     console.warn('[handleSendOtp] Failed to record OTP in phone_otps table:', dbErr);
   }
 
-  // Fast2SMS Delivery
-  const f2sRes = await Fast2SmsService.sendOtp(tenDigits, otpCode);
-  if (!f2sRes.success && !isTestPhone) {
-    return c.json({
-      success: false,
-      error: f2sRes.error || 'Failed to send SMS OTP via Fast2SMS',
-    }, 500);
+  // Fast2SMS Delivery (Bypassed for test review phone numbers)
+  if (!isTestPhone) {
+    const f2sRes = await Fast2SmsService.sendOtp(tenDigits, otpCode);
+    if (!f2sRes.success) {
+      return c.json({
+        success: false,
+        error: f2sRes.error || 'Failed to send SMS OTP via Fast2SMS',
+      }, 500);
+    }
   }
 
   return c.json({

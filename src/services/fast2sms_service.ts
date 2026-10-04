@@ -44,10 +44,10 @@ export class Fast2SmsService {
       return { success: false, error: 'Valid 10-digit phone number is required' };
     }
 
-    // Dev test numbers bypass
+    // Test numbers bypass (App review & QA)
     const testPhones = ['0000000000', '9999999999'];
-    if (this.isDev && testPhones.includes(tenDigits)) {
-      const testReqId = `dev_fast2sms_${Date.now()}`;
+    if (testPhones.includes(tenDigits)) {
+      const testReqId = `test_fast2sms_${Date.now()}`;
       return { success: true, requestId: testReqId };
     }
 
