@@ -2,7 +2,6 @@ import { Hono } from 'hono';
 import { Env, Variables } from '../../types';
 import { authMiddleware, hashToken } from '../../middleware/auth';
 import { getDatabase } from '../../db/db_context';
-import { WakitService } from '../../services/wakit_service';
 import { Fast2SmsService } from '../../services/fast2sms_service';
 
 const authApp = new Hono<{ Bindings: Env; Variables: Variables }>();
@@ -55,25 +54,13 @@ async function handleSendOtp(c: any) {
     console.warn('[handleSendOtp] Failed to record OTP in phone_otps table:', dbErr);
   }
 
-  // Delivery Gateway Logic:
-  // 1. If Fast2SMS is configured or test phone, use Fast2SMS
-  if (Fast2SmsService.isConfigured() || (isDev && !WakitService.isConfigured())) {
-    const f2sRes = await Fast2SmsService.sendOtp(tenDigits, otpCode);
-    if (!f2sRes.success && !isTestPhone) {
-      return c.json({
-        success: false,
-        error: f2sRes.error || 'Failed to send SMS OTP via Fast2SMS',
-      }, 500);
-    }
-  } else {
-    // 2. Fallback to Wakit WhatsApp Gateway if Fast2SMS key not configured yet
-    const otpRes = await WakitService.sendOtp(e164);
-    if (!otpRes.success && !isTestPhone) {
-      return c.json({
-        success: false,
-        error: otpRes.error || 'Failed to send OTP',
-      }, 500);
-    }
+  // Fast2SMS Delivery
+  const f2sRes = await Fast2SmsService.sendOtp(tenDigits, otpCode);
+  if (!f2sRes.success && !isTestPhone) {
+    return c.json({
+      success: false,
+      error: f2sRes.error || 'Failed to send SMS OTP via Fast2SMS',
+    }, 500);
   }
 
   return c.json({
@@ -152,11 +139,6 @@ async function handleVerifyOtp(c: any) {
     } catch (dbErr) {
       console.warn('[handleVerifyOtp] phone_otps lookup error:', dbErr);
     }
-  }
-
-  // 3. Fallback to Wakit verify (if Wakit was used for sending)
-  if (!isValidOtp && requestId && WakitService.isConfigured()) {
-    isValidOtp = await WakitService.verifyOtp(requestId, otp, e164);
   }
 
   if (!isValidOtp) {
