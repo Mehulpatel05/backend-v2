@@ -182,16 +182,11 @@ profileApp.put('/', authMiddleware, async (c) => {
         db.prepare('UPDATE user_blocks SET blocked_handle = ? WHERE LOWER(blocked_handle) = ? OR LOWER(blocked_handle) = ?').bind(cleanNewHandle, cleanUserHandle, `@${cleanUserHandle}`),
       ];
 
-      for (const stmt of cascadeUpdates) {
-        try {
-          await stmt.run();
-        } catch (err) {
-          console.warn('[ProfileUpdate] Cascade update warning:', err);
-        }
-      }
+      // Perform fast concurrent cascading updates across all relational tables
+      await Promise.allSettled(cascadeUpdates.map((stmt) => stmt.run()));
 
-      // Safe update for optional tables
-      const optionalTables = [
+      // Safe parallel update for optional tables
+      const optionalTables: Array<{ table: string; col: string }> = [
         { table: 'area_founders', col: 'user_id' },
         { table: 'founding_requests', col: 'user_id' },
         { table: 'points_ledger', col: 'user_handle' },
@@ -206,13 +201,12 @@ profileApp.put('/', authMiddleware, async (c) => {
         { table: 'user_coupons', col: 'user_handle' },
       ];
 
-      for (const opt of optionalTables) {
-        try {
-          await db.prepare(`UPDATE ${opt.table} SET ${opt.col} = ? WHERE LOWER(${opt.col}) = ? OR LOWER(${opt.col}) = ?`)
-            .bind(cleanNewHandle, cleanUserHandle, `@${cleanUserHandle}`)
-            .run();
-        } catch (_) {}
-      }
+      const optionalUpdates = optionalTables.map((opt) =>
+        db.prepare(`UPDATE ${opt.table} SET ${opt.col} = ? WHERE LOWER(${opt.col}) = ? OR LOWER(${opt.col}) = ?`)
+          .bind(cleanNewHandle, cleanUserHandle, `@${cleanUserHandle}`)
+          .run()
+      );
+      await Promise.allSettled(optionalUpdates);
 
       handleChanged = true;
       targetHandle = cleanNewHandle;

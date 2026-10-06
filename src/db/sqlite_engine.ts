@@ -50,6 +50,8 @@ CREATE TABLE IF NOT EXISTS profiles (
     friend_count INTEGER DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    name_updated_at TIMESTAMP NULL,
+    handle_updated_at TIMESTAMP NULL,
     FOREIGN KEY(handle) REFERENCES users(handle) ON DELETE CASCADE
 );
 
@@ -442,11 +444,7 @@ export class SqliteD1Adapter {
   }
 
   async batch(statements: any[]) {
-    const results = [];
-    for (const stmt of statements) {
-      results.push(await stmt.run());
-    }
-    return results;
+    return await Promise.allSettled(statements.map((stmt) => stmt.run()));
   }
 }
 
