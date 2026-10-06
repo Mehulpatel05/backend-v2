@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS users (
     id TEXT PRIMARY KEY,
     phone TEXT UNIQUE NOT NULL,
     handle TEXT UNIQUE NOT NULL,
+    is_verified INTEGER DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -48,6 +49,7 @@ CREATE TABLE IF NOT EXISTS profiles (
     banner_r2_path TEXT DEFAULT '',
     fcm_token TEXT DEFAULT '',
     friend_count INTEGER DEFAULT 0,
+    is_verified INTEGER DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     name_updated_at TIMESTAMP NULL,
@@ -332,8 +334,37 @@ export async function ensureSqliteSchema(): Promise<void> {
   schemaInitPromise = (async () => {
     try {
       const client = getClient();
-      await client.executeMultiple(SCHEMA_SQL);
-      console.log('✅ SQLite Schema initialized successfully.');
+      const statements = SCHEMA_SQL.split(';')
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0);
+
+      for (const sql of statements) {
+        try {
+          await client.execute(sql);
+        } catch (_) {}
+      }
+
+      const migrations = [
+        'ALTER TABLE profiles ADD COLUMN is_verified INTEGER DEFAULT 0',
+        'ALTER TABLE profiles ADD COLUMN name_updated_at TIMESTAMP NULL',
+        'ALTER TABLE profiles ADD COLUMN handle_updated_at TIMESTAMP NULL',
+        'ALTER TABLE users ADD COLUMN is_verified INTEGER DEFAULT 0',
+        'ALTER TABLE feed_posts ADD COLUMN city_id TEXT DEFAULT ""',
+        'ALTER TABLE feed_posts ADD COLUMN area_id TEXT DEFAULT ""',
+        'ALTER TABLE feed_posts ADD COLUMN area_name TEXT DEFAULT ""',
+        'ALTER TABLE feed_posts ADD COLUMN image_url TEXT DEFAULT ""',
+        'ALTER TABLE feed_posts ADD COLUMN lat REAL',
+        'ALTER TABLE feed_posts ADD COLUMN lng REAL',
+        'ALTER TABLE devices ADD COLUMN refresh_token_hash TEXT',
+      ];
+
+      for (const m of migrations) {
+        try {
+          await client.execute(m);
+        } catch (_) {}
+      }
+
+      console.log('✅ SQLite Schema initialized and migrated successfully.');
     } catch (err) {
       console.error('⚠️ Failed to initialize SQLite schema:', err);
     }

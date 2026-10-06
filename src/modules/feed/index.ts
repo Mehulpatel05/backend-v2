@@ -117,16 +117,8 @@ async function handleGetPosts(c: any) {
   }
 
   if (cityId && cityId.toUpperCase() !== 'ALL') {
-    if (areaId) {
-      query += ' AND ((LOWER(p.city_id) = LOWER(?) AND (LOWER(p.area_id) = LOWER(?) OR p.area_id = "" OR p.area_id IS NULL)) OR p.city_id = "" OR p.city_id IS NULL)';
-      params.push(cityId, areaId);
-    } else {
-      query += ' AND (LOWER(p.city_id) = LOWER(?) OR p.city_id = "" OR p.city_id IS NULL)';
-      params.push(cityId);
-    }
-  } else if (areaId) {
-    query += ' AND (LOWER(p.area_id) = LOWER(?) OR p.area_id = "" OR p.area_id IS NULL)';
-    params.push(areaId);
+    query += ' AND (LOWER(p.city_id) = LOWER(?) OR p.city_id = "" OR p.city_id IS NULL)';
+    params.push(cityId);
   }
 
   if (author) {
