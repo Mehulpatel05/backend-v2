@@ -3,6 +3,7 @@ import { Env, Variables } from '../../types';
 import { authMiddleware } from '../../middleware/auth';
 import { getDatabase } from '../../db/db_context';
 import { sendPushNotification } from '../../services/fcm_service';
+import { awardPoints } from '../rewards';
 
 const feedApp = new Hono<{ Bindings: Env; Variables: Variables }>();
 
@@ -231,10 +232,53 @@ async function handleCreatePost(c: any) {
     )
     .run();
 
+  let pointsAwarded = 0;
+  let dailyCapReached = false;
+
+  if (content.length >= 20 && category !== 'safety' && category !== 'urgent_safety') {
+    try {
+      const rewardResult = await awardPoints(db, {
+        userHandle: cleanHandle,
+        delta: 5,
+        reason: 'Created a post in your neighbourhood',
+        refType: 'post',
+        refId: postId,
+        isAction: true,
+      });
+      pointsAwarded = rewardResult.awardedDelta;
+      dailyCapReached = rewardResult.capReached ?? false;
+
+      const pendingRef = await db.prepare("SELECT * FROM referrals WHERE invitee_handle = ? AND status = 'pending'")
+        .bind(cleanHandle).first() as any;
+      if (pendingRef) {
+        await db.prepare("UPDATE referrals SET status = 'rewarded', rewarded_at = CURRENT_TIMESTAMP WHERE id = ?")
+          .bind(pendingRef.id).run();
+        await awardPoints(db, {
+          userHandle: pendingRef.inviter_handle,
+          delta: 25,
+          reason: `Friend @${cleanHandle} made their first post`,
+          refType: 'invite',
+          refId: pendingRef.id,
+          isAction: false,
+        });
+        await awardPoints(db, {
+          userHandle: cleanHandle,
+          delta: 25,
+          reason: 'Created first post after joining via invite',
+          refType: 'invite',
+          refId: pendingRef.id,
+          isAction: false,
+        });
+      }
+    } catch (_) {}
+  }
+
   return c.json({
     success: true,
     id: postId,
     postId,
+    pointsAwarded,
+    dailyCapReached,
     post: {
       id: postId,
       authorHandle: cleanHandle,
@@ -462,9 +506,35 @@ async function handleAddComment(c: any) {
     db.prepare('UPDATE feed_posts SET comments_count = comments_count + 1 WHERE id = ?').bind(postId),
   ]);
 
+  let pointsAwarded = 0;
+  let dailyCapReached = false;
+
+  if (content.length >= 10) {
+    try {
+      const post = await db.prepare('SELECT author_handle FROM feed_posts WHERE id = ?').bind(postId).first() as any;
+      const cleanAuthor = (post?.author_handle || '').replace(/^@+/, '').trim();
+      const cleanUser = (user.userHandle || '').replace(/^@+/, '').trim();
+
+      if (cleanAuthor !== cleanUser) {
+        const rewardResult = await awardPoints(db, {
+          userHandle: cleanUser,
+          delta: 3,
+          reason: 'Replied to a neighbour’s post',
+          refType: 'reply',
+          refId: commentId,
+          isAction: true,
+        });
+        pointsAwarded = rewardResult.awardedDelta;
+        dailyCapReached = rewardResult.capReached ?? false;
+      }
+    } catch (_) {}
+  }
+
   return c.json({
     success: true,
     commentId,
+    pointsAwarded,
+    dailyCapReached,
     message: 'Comment added successfully',
   });
 }

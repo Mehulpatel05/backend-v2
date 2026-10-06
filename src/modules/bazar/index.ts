@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { Env, Variables } from '../../types';
 import { authMiddleware } from '../../middleware/auth';
 import { getDatabase } from '../../db/db_context';
+import { awardPoints, checkAndAwardBadges } from '../rewards';
 
 const bazarApp = new Hono<{ Bindings: Env; Variables: Variables }>();
 
@@ -12,9 +13,12 @@ bazarApp.get('/listings', async (c) => {
   let query = `
     SELECT b.*,
       COALESCE(pr.display_name, b.seller_handle) AS seller_display_name,
-      COALESCE(pr.avatar_r2_path, '') AS seller_avatar_url
+      COALESCE(pr.avatar_r2_path, '') AS seller_avatar_url,
+      lb.id AS boost_id,
+      lb.ends_at AS boost_ends_at
     FROM bazar_listings b
     LEFT JOIN profiles pr ON LOWER(b.seller_handle) = LOWER(pr.handle)
+    LEFT JOIN listing_boosts lb ON b.id = lb.listing_id AND lb.ends_at > CURRENT_TIMESTAMP
     WHERE b.is_active = 1
   `;
   const params: any[] = [];
@@ -33,7 +37,7 @@ bazarApp.get('/listings', async (c) => {
     params.push(`%${search}%`, `%${search}%`);
   }
 
-  query += ' ORDER BY b.created_at DESC LIMIT ? OFFSET ?';
+  query += ' ORDER BY CASE WHEN lb.id IS NOT NULL THEN 1 ELSE 0 END DESC, b.created_at DESC LIMIT ? OFFSET ?';
   params.push(parseInt(limit), parseInt(offset));
 
   const db = getDatabase(c);
@@ -46,6 +50,7 @@ bazarApp.get('/listings', async (c) => {
     } catch (_) {}
     const cleanSeller = (row.seller_handle || '').replace(/^@+/, '').trim();
     const sellerDisplayName = (row.seller_display_name || cleanSeller).replace(/^@+/, '').trim();
+    const isFeatured = row.boost_id != null && new Date(row.boost_ends_at) > new Date();
     return {
       ...row,
       imageUrls: urls,
@@ -59,6 +64,8 @@ bazarApp.get('/listings', async (c) => {
       viewsCount: row.views_count || 0,
       chatsCount: row.chats_count || 0,
       isSold: row.is_active === 0,
+      isFeatured,
+      featuredEndsAt: row.boost_ends_at || null,
       createdAt: row.created_at,
     };
   });
@@ -121,9 +128,52 @@ bazarApp.post('/listings', authMiddleware, async (c) => {
     )
     .run();
 
+  let pointsAwarded = 0;
+  let dailyCapReached = false;
+
+  if (finalImages.length > 0) {
+    try {
+      const rewardResult = await awardPoints(db, {
+        userHandle: cleanHandle,
+        delta: 10,
+        reason: 'Listed an item in Bazaar',
+        refType: 'listing',
+        refId: id,
+        isAction: true,
+      });
+      pointsAwarded = rewardResult.awardedDelta;
+      dailyCapReached = rewardResult.capReached ?? false;
+
+      const pendingRef = await db.prepare("SELECT * FROM referrals WHERE invitee_handle = ? AND status = 'pending'")
+        .bind(cleanHandle).first() as any;
+      if (pendingRef) {
+        await db.prepare("UPDATE referrals SET status = 'rewarded', rewarded_at = CURRENT_TIMESTAMP WHERE id = ?")
+          .bind(pendingRef.id).run();
+        await awardPoints(db, {
+          userHandle: pendingRef.inviter_handle,
+          delta: 25,
+          reason: `Friend @${cleanHandle} listed an item`,
+          refType: 'invite',
+          refId: pendingRef.id,
+          isAction: false,
+        });
+        await awardPoints(db, {
+          userHandle: cleanHandle,
+          delta: 25,
+          reason: 'Listed first item after joining via invite',
+          refType: 'invite',
+          refId: pendingRef.id,
+          isAction: false,
+        });
+      }
+    } catch (_) {}
+  }
+
   return c.json({
     success: true,
     listingId: id,
+    pointsAwarded,
+    dailyCapReached,
     listing: {
       id,
       seller_handle: cleanHandle,
@@ -936,6 +986,12 @@ bazarApp.post('/listings/:id/sold', authMiddleware, async (c) => {
 
   if (res.meta?.changes === 0) {
     return c.json({ success: false, error: 'Listing not found or unauthorized' }, 404);
+  }
+
+  if (isSold) {
+    try {
+      await checkAndAwardBadges(db, user.userHandle);
+    } catch (_) {}
   }
 
   return c.json({
