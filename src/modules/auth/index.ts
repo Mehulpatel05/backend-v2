@@ -476,6 +476,20 @@ authApp.get('/profile', authMiddleware, async (c) => {
 
   const isVerified = (profile?.is_verified === 1) || (u?.is_verified === 1) || (profile?.bio && profile.bio.includes('[Verified]')) ? 1 : 0;
 
+  const nameElapsed = profile?.name_updated_at ? Date.now() - new Date(profile.name_updated_at).getTime() : Infinity;
+  const handleElapsed = profile?.handle_updated_at ? Date.now() - new Date(profile.handle_updated_at).getTime() : Infinity;
+  const nameCooldownMs = 14 * 24 * 60 * 60 * 1000;
+  const handleCooldownMs = 30 * 24 * 60 * 60 * 1000;
+
+  const canChangeName = !profile?.name_updated_at || isNaN(nameElapsed) || nameElapsed >= nameCooldownMs;
+  const canChangeHandle = !profile?.handle_updated_at || isNaN(handleElapsed) || handleElapsed >= handleCooldownMs;
+
+  const nameDaysRemaining = canChangeName ? 0 : Math.max(1, Math.ceil((nameCooldownMs - nameElapsed) / (24 * 60 * 60 * 1000)));
+  const handleDaysRemaining = canChangeHandle ? 0 : Math.max(1, Math.ceil((handleCooldownMs - handleElapsed) / (24 * 60 * 60 * 1000)));
+
+  const nextNameChangeAt = canChangeName ? null : new Date(new Date(profile.name_updated_at).getTime() + nameCooldownMs).toISOString();
+  const nextHandleChangeAt = canChangeHandle ? null : new Date(new Date(profile.handle_updated_at).getTime() + handleCooldownMs).toISOString();
+
   return c.json({
     success: true,
     user: {
@@ -490,6 +504,22 @@ authApp.get('/profile', authMiddleware, async (c) => {
       isVerified: isVerified === 1,
       is_verified: isVerified,
       friendCount: profile?.friend_count || 0,
+      nameUpdatedAt: profile?.name_updated_at || null,
+      name_updated_at: profile?.name_updated_at || null,
+      handleUpdatedAt: profile?.handle_updated_at || null,
+      handle_updated_at: profile?.handle_updated_at || null,
+      canChangeName,
+      can_change_name: canChangeName,
+      nameDaysRemaining,
+      name_days_remaining: nameDaysRemaining,
+      nextNameChangeAt,
+      next_name_change_at: nextNameChangeAt,
+      canChangeHandle,
+      can_change_handle: canChangeHandle,
+      handleDaysRemaining,
+      handle_days_remaining: handleDaysRemaining,
+      nextHandleChangeAt,
+      next_handle_change_at: nextHandleChangeAt,
     },
   });
 });
