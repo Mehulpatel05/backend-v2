@@ -16,6 +16,7 @@ import { preferencesApp } from './modules/preferences';
 import { feedbackApp } from './modules/feedback';
 import { adminApp } from './modules/admin';
 import { rewardsApp } from './modules/rewards';
+import { foundingApp, adminFoundingApp } from './modules/founding';
 import { authMiddleware } from './middleware/auth';
 import { getDatabase } from './db/db_context';
 
@@ -129,6 +130,11 @@ app.route('/admin', adminApp);
 
 app.route('/api/v2/rewards', rewardsApp);
 app.route('/rewards', rewardsApp);
+
+app.route('/api/v2/founding', foundingApp);
+app.route('/founding', foundingApp);
+app.route('/api/v2/admin/founding', adminFoundingApp);
+app.route('/admin/founding', adminFoundingApp);
 
 // 5. Central 404 & Error Handler
 app.notFound((c) => {
