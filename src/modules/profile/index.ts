@@ -11,7 +11,12 @@ profileApp.get('/:handle', async (c) => {
   const cleanHandle = raw.replace(/^@+/, '').trim();
 
   const db = getDatabase(c);
-  const profile = (await db.prepare('SELECT * FROM profiles WHERE handle = ? OR handle = ? LIMIT 1')
+  const profile = (await db.prepare(
+    `SELECT p.*, af.seq AS founder_seq, af.area_id AS founder_area_id
+     FROM profiles p
+     LEFT JOIN area_founders af ON (LOWER(af.user_id) = LOWER(p.handle) OR LOWER(af.user_id) = LOWER(REPLACE(p.handle, '@', '')))
+     WHERE p.handle = ? OR p.handle = ? LIMIT 1`
+  )
     .bind(cleanHandle, `@${cleanHandle}`)
     .first()) as any;
 
@@ -19,7 +24,10 @@ profileApp.get('/:handle', async (c) => {
     return c.json({ success: false, error: 'Profile not found' }, 404);
   }
 
-  const isVerified = (profile.is_verified === 1) || (profile.bio && profile.bio.includes('[Verified]')) ? 1 : 0;
+  const isFounder = profile.founder_seq != null && profile.founder_seq > 0;
+  const isVerifiedCitizen = (profile.is_verified === 1) || (profile.bio && profile.bio.includes('[Verified]'));
+  const isVerified = isFounder || isVerifiedCitizen;
+  const authorBadge = isFounder ? `FOUNDING #${profile.founder_seq}` : (isVerifiedCitizen ? 'VERIFIED' : null);
 
   return c.json({
     success: true,
@@ -28,8 +36,13 @@ profileApp.get('/:handle', async (c) => {
       handle: profile.handle.replace(/^@+/, '').trim(),
       photoUrl: profile.avatar_r2_path || null,
       avatarUrl: profile.avatar_r2_path || null,
-      isVerified: isVerified === 1,
-      is_verified: isVerified,
+      isVerified,
+      is_verified: isVerified ? 1 : 0,
+      authorBadge,
+      author_badge: authorBadge,
+      badge: authorBadge,
+      founderSeq: profile.founder_seq ?? null,
+      founderAreaId: profile.founder_area_id ?? null,
     },
   });
 });

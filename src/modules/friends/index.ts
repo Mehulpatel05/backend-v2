@@ -20,7 +20,9 @@ friendsApp.get('/', authMiddleware, async (c) => {
        END AS other_user,
        COALESCE(pr.display_name, CASE WHEN LOWER(f.user1_handle) = ? THEN f.user2_handle ELSE f.user1_handle END) AS display_name,
        COALESCE(pr.avatar_r2_path, '') AS avatar_r2_path,
-       COALESCE(pr.bio, '') AS bio
+       COALESCE(pr.bio, '') AS bio,
+       pr.is_verified,
+       af.seq AS founder_seq
      FROM friendships f
      LEFT JOIN profiles pr ON LOWER(
        CASE 
@@ -28,6 +30,12 @@ friendsApp.get('/', authMiddleware, async (c) => {
          ELSE f.user1_handle 
        END
      ) = LOWER(pr.handle)
+     LEFT JOIN area_founders af ON LOWER(
+       CASE 
+         WHEN LOWER(f.user1_handle) = ? THEN f.user2_handle 
+         ELSE f.user1_handle 
+       END
+     ) = LOWER(af.user_id)
      WHERE LOWER(f.user1_handle) = ? OR LOWER(f.user2_handle) = ?
      GROUP BY other_user
      ORDER BY f.created_at DESC`
@@ -39,6 +47,11 @@ friendsApp.get('/', authMiddleware, async (c) => {
 
   const formatted = (results || []).map((row: any) => {
     const other = (row.other_user || '').replace(/^@+/, '').trim();
+    const isFounder = row.founder_seq != null && row.founder_seq > 0;
+    const isVerifiedCitizen = row.is_verified === 1 || (row.bio && row.bio.includes('[Verified]'));
+    const isVerified = isFounder || isVerifiedCitizen;
+    const authorBadge = isFounder ? `FOUNDING #${row.founder_seq}` : (isVerifiedCitizen ? 'VERIFIED' : null);
+
     return {
       id: row.id,
       otherUser: other,
@@ -46,6 +59,12 @@ friendsApp.get('/', authMiddleware, async (c) => {
       displayName: row.display_name || other,
       avatarUrl: row.avatar_r2_path || '',
       bio: row.bio || '',
+      isVerified,
+      is_verified: isVerified ? 1 : 0,
+      authorBadge,
+      author_badge: authorBadge,
+      badge: authorBadge,
+      founderSeq: row.founder_seq ?? null,
       createdAt: row.created_at,
     };
   });
@@ -72,9 +91,12 @@ friendsApp.get('/discover', authMiddleware, async (c) => {
       COALESCE(pr.avatar_r2_path, '') AS avatar_r2_path,
       COALESCE(pr.bio, '') AS bio,
       COALESCE(pr.friend_count, 0) AS friend_count,
+      pr.is_verified,
+      af.seq AS founder_seq,
       u.created_at
     FROM users u
     LEFT JOIN profiles pr ON LOWER(u.handle) = LOWER(pr.handle)
+    LEFT JOIN area_founders af ON LOWER(u.handle) = LOWER(af.user_id)
     WHERE LOWER(u.handle) != ? AND LOWER(u.handle) NOT LIKE 'anon#%' AND LOWER(u.handle) != 'guest'
       AND LOWER(u.handle) NOT LIKE 'user_%'
   `;
@@ -137,6 +159,11 @@ friendsApp.get('/discover', authMiddleware, async (c) => {
       relationship = 'requestReceivedByMe';
     }
 
+    const isFounder = row.founder_seq != null && row.founder_seq > 0;
+    const isVerifiedCitizen = row.is_verified === 1 || (row.bio && row.bio.includes('[Verified]'));
+    const isVerified = isFounder || isVerifiedCitizen;
+    const authorBadge = isFounder ? `FOUNDING #${row.founder_seq}` : (isVerifiedCitizen ? 'VERIFIED' : null);
+
     return {
       handle,
       displayName: row.display_name || handle,
@@ -144,7 +171,12 @@ friendsApp.get('/discover', authMiddleware, async (c) => {
       bio: row.bio || '',
       friendCount: row.friend_count || 0,
       relationship,
-      badge: 'Vadodara Neighbor',
+      isVerified,
+      is_verified: isVerified ? 1 : 0,
+      authorBadge,
+      author_badge: authorBadge,
+      badge: authorBadge || 'Vadodara Neighbor',
+      founderSeq: row.founder_seq ?? null,
     };
   });
 
@@ -656,9 +688,12 @@ friendsApp.get('/requests', authMiddleware, async (c) => {
     `SELECT r.id, r.sender_handle, r.receiver_handle, r.created_at,
             COALESCE(pr.display_name, r.sender_handle) AS display_name,
             COALESCE(pr.avatar_r2_path, '') AS avatar_r2_path,
-            COALESCE(pr.bio, '') AS bio
+            COALESCE(pr.bio, '') AS bio,
+            pr.is_verified,
+            af.seq AS founder_seq
      FROM friend_requests r
      LEFT JOIN profiles pr ON LOWER(r.sender_handle) = LOWER(pr.handle)
+     LEFT JOIN area_founders af ON LOWER(r.sender_handle) = LOWER(af.user_id)
      WHERE LOWER(r.receiver_handle) = ? AND r.status = 'pending'
      GROUP BY LOWER(r.sender_handle)
      ORDER BY r.created_at DESC`
@@ -670,9 +705,12 @@ friendsApp.get('/requests', authMiddleware, async (c) => {
     `SELECT r.id, r.sender_handle, r.receiver_handle, r.created_at,
             COALESCE(pr.display_name, r.receiver_handle) AS display_name,
             COALESCE(pr.avatar_r2_path, '') AS avatar_r2_path,
-            COALESCE(pr.bio, '') AS bio
+            COALESCE(pr.bio, '') AS bio,
+            pr.is_verified,
+            af.seq AS founder_seq
      FROM friend_requests r
      LEFT JOIN profiles pr ON LOWER(r.receiver_handle) = LOWER(pr.handle)
+     LEFT JOIN area_founders af ON LOWER(r.receiver_handle) = LOWER(af.user_id)
      WHERE LOWER(r.sender_handle) = ? AND r.status = 'pending'
      GROUP BY LOWER(r.receiver_handle)
      ORDER BY r.created_at DESC`
@@ -684,6 +722,11 @@ friendsApp.get('/requests', authMiddleware, async (c) => {
     success: true,
     received: (received || []).map((row: any) => {
       const dName = (row.display_name || row.sender_handle || '').replace(/^@+/, '').trim();
+      const isFounder = row.founder_seq != null && row.founder_seq > 0;
+      const isVerifiedCitizen = row.is_verified === 1 || (row.bio && row.bio.includes('[Verified]'));
+      const isVerified = isFounder || isVerifiedCitizen;
+      const authorBadge = isFounder ? `FOUNDING #${row.founder_seq}` : (isVerifiedCitizen ? 'VERIFIED' : null);
+
       return {
         id: row.id,
         senderHandle: (row.sender_handle || '').replace(/^@+/, ''),
@@ -694,11 +737,22 @@ friendsApp.get('/requests', authMiddleware, async (c) => {
         avatarUrl: row.avatar_r2_path || '',
         senderAvatarUrl: row.avatar_r2_path || '',
         bio: row.bio || '',
+        isVerified,
+        is_verified: isVerified ? 1 : 0,
+        authorBadge,
+        author_badge: authorBadge,
+        badge: authorBadge,
+        founderSeq: row.founder_seq ?? null,
         createdAt: row.created_at,
       };
     }),
     sent: (sent || []).map((row: any) => {
       const dName = (row.display_name || row.receiver_handle || '').replace(/^@+/, '').trim();
+      const isFounder = row.founder_seq != null && row.founder_seq > 0;
+      const isVerifiedCitizen = row.is_verified === 1 || (row.bio && row.bio.includes('[Verified]'));
+      const isVerified = isFounder || isVerifiedCitizen;
+      const authorBadge = isFounder ? `FOUNDING #${row.founder_seq}` : (isVerifiedCitizen ? 'VERIFIED' : null);
+
       return {
         id: row.id,
         senderHandle: myHandle,
@@ -709,6 +763,12 @@ friendsApp.get('/requests', authMiddleware, async (c) => {
         avatarUrl: row.avatar_r2_path || '',
         receiverAvatarUrl: row.avatar_r2_path || '',
         bio: row.bio || '',
+        isVerified,
+        is_verified: isVerified ? 1 : 0,
+        authorBadge,
+        author_badge: authorBadge,
+        badge: authorBadge,
+        founderSeq: row.founder_seq ?? null,
         createdAt: row.created_at,
       };
     }),

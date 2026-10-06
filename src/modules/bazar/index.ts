@@ -14,10 +14,14 @@ bazarApp.get('/listings', async (c) => {
     SELECT b.*,
       COALESCE(pr.display_name, b.seller_handle) AS seller_display_name,
       COALESCE(pr.avatar_r2_path, '') AS seller_avatar_url,
+      pr.is_verified,
+      pr.bio,
+      af.seq AS founder_seq,
       lb.id AS boost_id,
       lb.ends_at AS boost_ends_at
     FROM bazar_listings b
-    LEFT JOIN profiles pr ON LOWER(b.seller_handle) = LOWER(pr.handle)
+    LEFT JOIN profiles pr ON (LOWER(b.seller_handle) = LOWER(pr.handle) OR LOWER(b.seller_handle) = '@' || LOWER(pr.handle) OR '@' || LOWER(b.seller_handle) = LOWER(pr.handle))
+    LEFT JOIN area_founders af ON (LOWER(af.user_id) = LOWER(b.seller_handle) OR LOWER(af.user_id) = LOWER(REPLACE(b.seller_handle, '@', '')))
     LEFT JOIN listing_boosts lb ON b.id = lb.listing_id AND lb.ends_at > CURRENT_TIMESTAMP
     WHERE b.is_active = 1
   `;
@@ -51,6 +55,11 @@ bazarApp.get('/listings', async (c) => {
     const cleanSeller = (row.seller_handle || '').replace(/^@+/, '').trim();
     const sellerDisplayName = (row.seller_display_name || cleanSeller).replace(/^@+/, '').trim();
     const isFeatured = row.boost_id != null && new Date(row.boost_ends_at) > new Date();
+    const isFounder = row.founder_seq != null && row.founder_seq > 0;
+    const isVerifiedCitizen = row.is_verified === 1 || (row.bio && row.bio.includes('[Verified]'));
+    const isVerified = isFounder || isVerifiedCitizen;
+    const sellerBadge = isFounder ? `FOUNDING #${row.founder_seq}` : (isVerifiedCitizen ? 'VERIFIED' : null);
+
     return {
       ...row,
       imageUrls: urls,
@@ -61,6 +70,13 @@ bazarApp.get('/listings', async (c) => {
       sellerDisplayName: sellerDisplayName,
       seller_display_name: sellerDisplayName,
       sellerAvatarUrl: row.seller_avatar_url || '',
+      isVerified,
+      is_verified: isVerified ? 1 : 0,
+      sellerBadge,
+      authorBadge: sellerBadge,
+      author_badge: sellerBadge,
+      badge: sellerBadge,
+      founderSeq: row.founder_seq ?? null,
       viewsCount: row.views_count || 0,
       chatsCount: row.chats_count || 0,
       isSold: row.is_active === 0,
@@ -398,19 +414,25 @@ bazarApp.get('/shops', async (c) => {
   const { category, search, limit = '50', offset = '0' } = c.req.query();
   const db = getDatabase(c);
 
-  let query = "SELECT * FROM bazar_shops WHERE status = 'active'";
+  let query = `
+    SELECT s.*, pr.is_verified, pr.bio, af.seq AS founder_seq
+    FROM bazar_shops s
+    LEFT JOIN profiles pr ON (LOWER(s.owner_handle) = LOWER(pr.handle) OR LOWER(s.owner_handle) = '@' || LOWER(pr.handle) OR '@' || LOWER(s.owner_handle) = LOWER(pr.handle))
+    LEFT JOIN area_founders af ON (LOWER(af.user_id) = LOWER(s.owner_handle) OR LOWER(af.user_id) = LOWER(REPLACE(s.owner_handle, '@', '')))
+    WHERE s.status = 'active'
+  `;
   const params: any[] = [];
 
   if (category && category !== 'All') {
-    query += ' AND category = ?';
+    query += ' AND s.category = ?';
     params.push(category);
   }
   if (search) {
-    query += ' AND (shop_name LIKE ? OR description LIKE ? OR address LIKE ?)';
+    query += ' AND (s.shop_name LIKE ? OR s.description LIKE ? OR s.address LIKE ?)';
     params.push(`%${search}%`, `%${search}%`, `%${search}%`);
   }
 
-  query += ' ORDER BY created_at DESC LIMIT ? OFFSET ?';
+  query += ' ORDER BY s.created_at DESC LIMIT ? OFFSET ?';
   params.push(parseInt(limit), parseInt(offset));
 
   const { results: shops } = await db.prepare(query).bind(...params).all();
@@ -418,6 +440,10 @@ bazarApp.get('/shops', async (c) => {
   const formattedShops = await Promise.all(
     (shops || []).map(async (row: any) => {
       const cleanOwner = (row.owner_handle || '').replace(/^@+/, '').trim();
+      const isFounder = row.founder_seq != null && row.founder_seq > 0;
+      const isVerifiedCitizen = row.is_verified === 1 || (row.bio && row.bio.includes('[Verified]'));
+      const isVerified = isFounder || isVerifiedCitizen;
+      const ownerBadge = isFounder ? `FOUNDING #${row.founder_seq}` : (isVerifiedCitizen ? 'VERIFIED' : null);
 
       const { results: products } = await db.prepare(
         'SELECT * FROM bazar_listings WHERE (shop_id = ? OR seller_handle = ? OR seller_handle = ?) AND is_active = 1 ORDER BY created_at DESC LIMIT 10'
@@ -464,7 +490,12 @@ bazarApp.get('/shops', async (c) => {
         aboutText: row.description || '',
         status: row.status || 'active',
         isOpen: row.status !== 'inactive',
-        isVerified: true,
+        isVerified,
+        is_verified: isVerified ? 1 : 0,
+        ownerBadge,
+        badge: ownerBadge,
+        authorBadge: ownerBadge,
+        founderSeq: row.founder_seq ?? null,
         products: formattedProducts,
       };
     })
@@ -482,7 +513,11 @@ bazarApp.get('/shops/:id', async (c) => {
   const db = getDatabase(c);
 
   const shop = (await db.prepare(
-    'SELECT * FROM bazar_shops WHERE id = ? LIMIT 1'
+    `SELECT s.*, pr.is_verified, pr.bio, af.seq AS founder_seq
+     FROM bazar_shops s
+     LEFT JOIN profiles pr ON (LOWER(s.owner_handle) = LOWER(pr.handle) OR LOWER(s.owner_handle) = '@' || LOWER(pr.handle) OR '@' || LOWER(s.owner_handle) = LOWER(pr.handle))
+     LEFT JOIN area_founders af ON (LOWER(af.user_id) = LOWER(s.owner_handle) OR LOWER(af.user_id) = LOWER(REPLACE(s.owner_handle, '@', '')))
+     WHERE s.id = ? LIMIT 1`
   )
     .bind(shopId)
     .first()) as any;
@@ -492,6 +527,11 @@ bazarApp.get('/shops/:id', async (c) => {
   }
 
   const cleanOwner = (shop.owner_handle || '').replace(/^@+/, '').trim();
+  const isFounder = shop.founder_seq != null && shop.founder_seq > 0;
+  const isVerifiedCitizen = shop.is_verified === 1 || (shop.bio && shop.bio.includes('[Verified]'));
+  const isVerified = isFounder || isVerifiedCitizen;
+  const ownerBadge = isFounder ? `FOUNDING #${shop.founder_seq}` : (isVerifiedCitizen ? 'VERIFIED' : null);
+
   const { results: products } = await db.prepare(
     'SELECT * FROM bazar_listings WHERE (shop_id = ? OR seller_handle = ? OR seller_handle = ?) AND is_active = 1 ORDER BY created_at DESC'
   )
@@ -539,7 +579,12 @@ bazarApp.get('/shops/:id', async (c) => {
       aboutText: shop.description || '',
       status: shop.status || 'active',
       isOpen: shop.status !== 'inactive',
-      isVerified: true,
+      isVerified,
+      is_verified: isVerified ? 1 : 0,
+      ownerBadge,
+      badge: ownerBadge,
+      authorBadge: ownerBadge,
+      founderSeq: shop.founder_seq ?? null,
       products: formattedProducts,
     },
   });
@@ -549,12 +594,17 @@ bazarApp.get('/shops/:id', async (c) => {
 bazarApp.get('/my-shop', authMiddleware, async (c) => {
   const user = c.get('user');
   const db = getDatabase(c);
+  const cleanHandle = user.userHandle.replace(/^@+/, '').trim();
 
-  const shop = await db.prepare(
-    'SELECT * FROM bazar_shops WHERE owner_handle = ? OR owner_handle = ? LIMIT 1'
+  const shop = (await db.prepare(
+    `SELECT s.*, pr.is_verified, pr.bio, af.seq AS founder_seq
+     FROM bazar_shops s
+     LEFT JOIN profiles pr ON (LOWER(s.owner_handle) = LOWER(pr.handle) OR LOWER(s.owner_handle) = '@' || LOWER(pr.handle))
+     LEFT JOIN area_founders af ON (LOWER(af.user_id) = LOWER(s.owner_handle) OR LOWER(af.user_id) = LOWER(REPLACE(s.owner_handle, '@', '')))
+     WHERE LOWER(s.owner_handle) = LOWER(?) OR LOWER(s.owner_handle) = '@' || LOWER(?) LIMIT 1`
   )
-    .bind(user.userHandle, user.userHandle.replace('@', ''))
-    .first();
+    .bind(cleanHandle, cleanHandle)
+    .first()) as any;
 
   if (!shop) {
     return c.json({
@@ -563,6 +613,11 @@ bazarApp.get('/my-shop', authMiddleware, async (c) => {
       message: 'No shop registered for this user',
     });
   }
+
+  const isFounder = shop.founder_seq != null && shop.founder_seq > 0;
+  const isVerifiedCitizen = shop.is_verified === 1 || (shop.bio && shop.bio.includes('[Verified]'));
+  const isVerified = isFounder || isVerifiedCitizen;
+  const ownerBadge = isFounder ? `FOUNDING #${shop.founder_seq}` : (isVerifiedCitizen ? 'VERIFIED' : null);
 
   // Aggregate shop's product stats
   const { results: products } = await db.prepare(
@@ -593,7 +648,12 @@ bazarApp.get('/my-shop', authMiddleware, async (c) => {
       description: shop.description || '',
       status: shop.status || 'active',
       isOpen: shop.status !== 'inactive',
-      isVerified: true,
+      isVerified,
+      is_verified: isVerified ? 1 : 0,
+      ownerBadge,
+      badge: ownerBadge,
+      authorBadge: ownerBadge,
+      founderSeq: shop.founder_seq ?? null,
       stats: {
         viewsThisWeek: totalViews,
         chatsCount: totalChats,

@@ -22,7 +22,10 @@ chatApp.get('/', authMiddleware, async (c) => {
   const { results } = await db.prepare(
     `SELECT c.*,
        COALESCE(pr.display_name, CASE WHEN LOWER(c.user1_handle) = ? THEN c.user2_handle ELSE c.user1_handle END) AS other_display_name,
-       COALESCE(pr.avatar_r2_path, '') AS other_avatar_r2_path
+       COALESCE(pr.avatar_r2_path, '') AS other_avatar_r2_path,
+       pr.is_verified,
+       pr.bio,
+       af.seq AS founder_seq
      FROM chats c
      LEFT JOIN profiles pr ON LOWER(
        CASE 
@@ -30,10 +33,16 @@ chatApp.get('/', authMiddleware, async (c) => {
          ELSE c.user1_handle 
        END
      ) = LOWER(pr.handle)
+     LEFT JOIN area_founders af ON LOWER(
+       CASE 
+         WHEN LOWER(c.user1_handle) = ? THEN c.user2_handle 
+         ELSE c.user1_handle 
+       END
+     ) = LOWER(af.user_id)
      WHERE LOWER(c.user1_handle) = ? OR LOWER(c.user2_handle) = ?
      ORDER BY c.last_timestamp DESC`
   )
-    .bind(myHandle, myHandle, myHandle, myHandle)
+    .bind(myHandle, myHandle, myHandle, myHandle, myHandle)
     .all();
 
   const formatted = (results || []).map((row: any) => {
@@ -43,6 +52,10 @@ chatApp.get('/', authMiddleware, async (c) => {
     const otherUser = isUser1 ? u2 : u1;
     const otherDisplayName = (row.other_display_name || otherUser).replace(/^@+/, '').trim();
     const unreadCount = isUser1 ? row.unread_count_user1 : row.unread_count_user2;
+    const isFounder = row.founder_seq != null && row.founder_seq > 0;
+    const isVerifiedCitizen = row.is_verified === 1 || (row.bio && row.bio.includes('[Verified]'));
+    const isVerified = isFounder || isVerifiedCitizen;
+    const authorBadge = isFounder ? `FOUNDING #${row.founder_seq}` : (isVerifiedCitizen ? 'VERIFIED' : null);
 
     return {
       id: row.id,
@@ -56,6 +69,12 @@ chatApp.get('/', authMiddleware, async (c) => {
       name: otherDisplayName,
       avatarUrl: row.other_avatar_r2_path || '',
       partnerAvatarUrl: row.other_avatar_r2_path || '',
+      isVerified,
+      is_verified: isVerified ? 1 : 0,
+      authorBadge,
+      author_badge: authorBadge,
+      badge: authorBadge,
+      founderSeq: row.founder_seq ?? null,
       lastMessage: row.last_message || '',
       lastMessageType: row.last_message_type || 'text',
       lastTimestamp: row.last_timestamp || Date.now(),

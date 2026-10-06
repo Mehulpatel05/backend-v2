@@ -23,6 +23,12 @@ function formatPostRow(row: any, userVote: number = 0) {
   }
 
   const cleanAuthor = (row.author_handle || '').replace(/^@+/, '').trim();
+  const isFounder = row.founder_seq != null && row.founder_seq > 0;
+  const isVerifiedCitizen = row.is_verified === 1 || (row.bio && row.bio.includes('[Verified]'));
+  const isVerified = isFounder || isVerifiedCitizen;
+  const authorBadge = isFounder
+    ? `FOUNDING #${row.founder_seq}`
+    : (isVerifiedCitizen ? 'VERIFIED' : (row.author_badge || null));
 
   return {
     id: row.id,
@@ -78,6 +84,11 @@ function formatPostRow(row: any, userVote: number = 0) {
     authorName: row.display_name || row.author_handle,
     author_name: row.display_name || row.author_handle,
     avatarUrl: row.avatar_r2_path || null,
+    isVerified,
+    is_verified: isVerified ? 1 : 0,
+    authorBadge,
+    author_badge: authorBadge,
+    founderSeq: row.founder_seq ?? null,
   };
 }
 
@@ -91,9 +102,10 @@ async function handleGetPosts(c: any) {
   const cursor = c.req.query('cursor');
 
   let query = `
-    SELECT p.*, pr.display_name, pr.avatar_r2_path
+    SELECT p.*, pr.display_name, pr.avatar_r2_path, pr.is_verified, pr.bio, af.seq AS founder_seq
     FROM feed_posts p
-    LEFT JOIN profiles pr ON p.author_handle = pr.handle
+    LEFT JOIN profiles pr ON (LOWER(p.author_handle) = LOWER(pr.handle) OR LOWER(p.author_handle) = '@' || LOWER(pr.handle) OR '@' || LOWER(p.author_handle) = LOWER(pr.handle))
+    LEFT JOIN area_founders af ON (LOWER(af.user_id) = LOWER(p.author_handle) OR LOWER(af.user_id) = LOWER(REPLACE(p.author_handle, '@', '')))
     WHERE (p.status = 'active' OR p.status IS NULL OR p.status = '')
   `;
   const params: any[] = [];
@@ -465,18 +477,39 @@ async function handleGetComments(c: any) {
   const postId = c.req.param('id');
   const db = getDatabase(c);
   const { results } = await db.prepare(
-    `SELECT c.*, pr.display_name, pr.avatar_r2_path
+    `SELECT c.*, pr.display_name, pr.avatar_r2_path, pr.is_verified, pr.bio, af.seq AS founder_seq
      FROM feed_comments c
-     LEFT JOIN profiles pr ON c.author_handle = pr.handle
+     LEFT JOIN profiles pr ON (LOWER(c.author_handle) = LOWER(pr.handle) OR LOWER(c.author_handle) = '@' || LOWER(pr.handle) OR '@' || LOWER(c.author_handle) = LOWER(pr.handle))
+     LEFT JOIN area_founders af ON (LOWER(af.user_id) = LOWER(c.author_handle) OR LOWER(af.user_id) = LOWER(REPLACE(c.author_handle, '@', '')))
      WHERE c.post_id = ?
      ORDER BY c.created_at ASC`
   )
     .bind(postId)
     .all();
 
+  const formatted = (results || []).map((row: any) => {
+    const isFounder = row.founder_seq != null && row.founder_seq > 0;
+    const isVerifiedCitizen = row.is_verified === 1 || (row.bio && row.bio.includes('[Verified]'));
+    const isVerified = isFounder || isVerifiedCitizen;
+    const authorBadge = isFounder ? `FOUNDING #${row.founder_seq}` : (isVerifiedCitizen ? 'VERIFIED' : null);
+    const cleanAuthor = (row.author_handle || '').replace(/^@+/, '').trim();
+    return {
+      ...row,
+      authorHandle: cleanAuthor,
+      author_handle: cleanAuthor,
+      displayName: row.display_name || cleanAuthor,
+      avatarUrl: row.avatar_r2_path || '',
+      isVerified,
+      is_verified: isVerified ? 1 : 0,
+      authorBadge,
+      author_badge: authorBadge,
+      founderSeq: row.founder_seq ?? null,
+    };
+  });
+
   return c.json({
     success: true,
-    comments: results || [],
+    comments: formatted,
   });
 }
 
