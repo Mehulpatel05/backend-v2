@@ -534,8 +534,8 @@ authApp.get('/profile/:handle', async (c) => {
       handle: handle,
       name: profile?.display_name || handle,
       displayName: profile?.display_name || handle,
-      display_name: profile?.display_name || handle,
       avatarUrl: profile?.avatar_r2_path || '',
+      photoUrl: profile?.avatar_r2_path || '',
       bio: profile?.bio || '',
       isVerified: isVerified === 1,
       is_verified: isVerified,
@@ -544,6 +544,8 @@ authApp.get('/profile/:handle', async (c) => {
     profile: profile ? {
       ...profile,
       handle: handle,
+      photoUrl: profile.avatar_r2_path || '',
+      avatarUrl: profile.avatar_r2_path || '',
       isVerified: isVerified === 1,
       is_verified: isVerified,
     } : null,

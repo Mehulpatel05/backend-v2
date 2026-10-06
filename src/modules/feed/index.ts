@@ -94,7 +94,7 @@ async function handleGetPosts(c: any) {
     SELECT p.*, pr.display_name, pr.avatar_r2_path
     FROM feed_posts p
     LEFT JOIN profiles pr ON p.author_handle = pr.handle
-    WHERE p.status = 'active'
+    WHERE (p.status = 'active' OR p.status IS NULL OR p.status = '')
   `;
   const params: any[] = [];
 

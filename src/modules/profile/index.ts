@@ -26,6 +26,8 @@ profileApp.get('/:handle', async (c) => {
     profile: {
       ...profile,
       handle: profile.handle.replace(/^@+/, '').trim(),
+      photoUrl: profile.avatar_r2_path || null,
+      avatarUrl: profile.avatar_r2_path || null,
       isVerified: isVerified === 1,
       is_verified: isVerified,
     },
