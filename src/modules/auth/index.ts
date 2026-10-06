@@ -3,6 +3,7 @@ import { Env, Variables } from '../../types';
 import { authMiddleware, hashToken } from '../../middleware/auth';
 import { getDatabase } from '../../db/db_context';
 import { Fast2SmsService } from '../../services/fast2sms_service';
+import { executeDeleteAccount } from '../account/delete_account_service';
 
 const authApp = new Hono<{ Bindings: Env; Variables: Variables }>();
 
@@ -587,29 +588,12 @@ authApp.delete('/account', authMiddleware, async (c) => {
   const user = c.get('user');
   const db = getDatabase(c);
 
-  try {
-    await db.batch([
-      db.prepare('DELETE FROM devices WHERE user_handle = ? OR installation_id = ?').bind(user.userHandle, user.installationId),
-      db.prepare('DELETE FROM profiles WHERE handle = ?').bind(user.userHandle),
-      db.prepare('DELETE FROM bazar_listings WHERE seller_handle = ?').bind(user.userHandle),
-      db.prepare('DELETE FROM bazar_shops WHERE owner_handle = ?').bind(user.userHandle),
-      db.prepare('DELETE FROM bazar_saved WHERE user_handle = ?').bind(user.userHandle),
-      db.prepare('DELETE FROM feed_posts WHERE author_handle = ?').bind(user.userHandle),
-      db.prepare('DELETE FROM feed_likes WHERE user_handle = ?').bind(user.userHandle),
-      db.prepare('DELETE FROM feed_comments WHERE author_handle = ?').bind(user.userHandle),
-      db.prepare('DELETE FROM friend_requests WHERE sender_handle = ? OR receiver_handle = ?').bind(user.userHandle, user.userHandle),
-      db.prepare('DELETE FROM friendships WHERE user1_handle = ? OR user2_handle = ?').bind(user.userHandle, user.userHandle),
-      db.prepare('DELETE FROM notifications WHERE target_handle = ? OR sender_handle = ?').bind(user.userHandle, user.userHandle),
-      db.prepare('DELETE FROM users WHERE handle = ?').bind(user.userHandle),
-    ]);
-  } catch (e) {
-    console.error('[deleteAccount] D1 batch delete error:', e);
+  const result = await executeDeleteAccount(db, user.userHandle, user.installationId);
+  if (!result.success) {
+    return c.json(result, 500);
   }
 
-  return c.json({
-    success: true,
-    message: 'Account deleted permanently',
-  });
+  return c.json(result, 200);
 });
 
 // Get Current Auth State (Me)

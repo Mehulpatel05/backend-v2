@@ -17,6 +17,7 @@ import { feedbackApp } from './modules/feedback';
 import { adminApp } from './modules/admin';
 import { rewardsApp } from './modules/rewards';
 import { foundingApp, adminFoundingApp } from './modules/founding';
+import { accountApp } from './modules/account';
 import { authMiddleware } from './middleware/auth';
 import { getDatabase } from './db/db_context';
 
@@ -85,6 +86,9 @@ app.post('/users/fcm-token', authMiddleware, handleFcmToken);
 // 4. Mount Modular API Routes
 app.route('/api/v2/auth', authApp);
 app.route('/auth', authApp);
+
+app.route('/api/v2/account', accountApp);
+app.route('/account', accountApp);
 
 app.route('/api/v2/profile', profileApp);
 app.route('/profile', profileApp);
