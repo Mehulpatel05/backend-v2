@@ -123,6 +123,12 @@ export async function checkAndAwardBadges(db: any, userHandle: string): Promise<
   if (soldCount >= 5) {
     await awardBadgeIfNew(db, clean, 'top_seller');
   }
+
+  const isFounder = await db.prepare("SELECT 1 FROM area_founders WHERE LOWER(user_id) = LOWER(?) OR LOWER(user_id) = LOWER(?)")
+    .bind(clean, `@${clean}`).first() as any;
+  if (isFounder) {
+    await awardBadgeIfNew(db, clean, 'founding_neighbour');
+  }
 }
 
 async function awardBadgeIfNew(db: any, userHandle: string, badgeKey: string): Promise<void> {
@@ -149,7 +155,11 @@ rewardsApp.get('/me', authMiddleware, async (c) => {
 
   if (rewards.last_streak_date !== today) {
     if (rewards.last_streak_date === yesterday) {
-      streakCount += 1;
+      if ((rewards.streak_count || 0) >= 7) {
+        streakCount = 1;
+      } else {
+        streakCount = (rewards.streak_count || 0) + 1;
+      }
     } else {
       streakCount = 1;
     }
@@ -158,7 +168,6 @@ rewardsApp.get('/me', authMiddleware, async (c) => {
     if (streakCount === 7) {
       extraPoints = 30;
       streakAwarded = true;
-      streakCount = 0;
     }
 
     await db.prepare('UPDATE user_rewards SET streak_count = ?, last_streak_date = ? WHERE user_handle = ?')
@@ -173,6 +182,8 @@ rewardsApp.get('/me', authMiddleware, async (c) => {
         refId: `streak_${today}`,
         isAction: false,
       });
+      rewards.balance = (rewards.balance || 0) + extraPoints;
+      rewards.lifetime_points = (rewards.lifetime_points || 0) + extraPoints;
     }
   }
 
@@ -198,12 +209,19 @@ rewardsApp.get('/me', authMiddleware, async (c) => {
   const nextGoalPoints = 300;
   const pointsToNextGoal = Math.max(0, nextGoalPoints - rewards.balance);
 
+  const weeklySumRow = await db.prepare(`
+    SELECT COALESCE(SUM(delta), 0) as weekly_sum
+    FROM points_ledger
+    WHERE user_handle = ? AND delta > 0 AND created_at >= datetime('now', '-7 days')
+  `).bind(clean).first() as any;
+  const weeklyPoints = weeklySumRow?.weekly_sum ?? rewards.weekly_points ?? 0;
+
   return c.json({
     success: true,
     data: {
       balance: rewards.balance,
       lifetimePoints: rewards.lifetime_points,
-      weeklyPoints: rewards.weekly_points,
+      weeklyPoints,
       streakCount: streakCount,
       streakAwarded,
       dailyPointsToday: rewards.daily_points_today,
@@ -314,11 +332,20 @@ rewardsApp.get('/leaderboard', authMiddleware, async (c) => {
   const db = getDatabase(c);
 
   const topUsers = await db.prepare(`
-    SELECT r.user_handle, r.weekly_points, p.display_name, p.avatar_r2_path,
+    SELECT r.user_handle,
+      COALESCE((
+        SELECT SUM(pl.delta)
+        FROM points_ledger pl
+        WHERE pl.user_handle = r.user_handle
+          AND pl.delta > 0
+          AND pl.created_at >= datetime('now', '-7 days')
+      ), 0) AS calculated_weekly_points,
+      r.lifetime_points,
+      p.display_name, p.avatar_r2_path,
       (SELECT badge_key FROM user_badges ub WHERE ub.user_handle = r.user_handle ORDER BY CASE ub.badge_key WHEN 'local_hero' THEN 1 WHEN 'helper' THEN 2 ELSE 3 END LIMIT 1) as top_badge
     FROM user_rewards r
     LEFT JOIN profiles p ON r.user_handle = p.handle OR '@' || r.user_handle = p.handle
-    ORDER BY r.weekly_points DESC, r.lifetime_points DESC
+    ORDER BY calculated_weekly_points DESC, r.lifetime_points DESC
     LIMIT 10
   `).all() as any;
 
@@ -330,7 +357,7 @@ rewardsApp.get('/leaderboard', authMiddleware, async (c) => {
       handle: item.user_handle,
       displayName: item.display_name || item.user_handle,
       avatarUrl: item.avatar_r2_path || '',
-      points: item.weekly_points || 0,
+      points: item.calculated_weekly_points || 0,
       topBadge: item.top_badge || null,
     };
   });
@@ -405,6 +432,22 @@ rewardsApp.post('/boost', authMiddleware, async (c) => {
 
   if (!listingId) {
     return c.json({ success: false, error: 'Listing ID is required' }, 400);
+  }
+
+  const listing = await db.prepare('SELECT seller_handle FROM bazar_listings WHERE id = ?')
+    .bind(listingId).first() as any;
+  if (!listing) {
+    return c.json({ success: false, error: 'Listing not found' }, 404);
+  }
+  const cleanSeller = (listing.seller_handle || '').replace(/^@+/, '').trim();
+  if (cleanSeller !== clean) {
+    return c.json({ success: false, error: 'You can only boost your own listings.' }, 403);
+  }
+
+  const activeBoost = await db.prepare('SELECT id FROM listing_boosts WHERE listing_id = ? AND ends_at > CURRENT_TIMESTAMP')
+    .bind(listingId).first() as any;
+  if (activeBoost) {
+    return c.json({ success: false, error: 'This listing is already currently boosted.' }, 400);
   }
 
   const rewards = await getOrCreateUserRewards(db, clean);
@@ -547,7 +590,7 @@ rewardsApp.post('/replies/:id/helpful', authMiddleware, async (c) => {
       delta: 5,
       reason: 'Reply marked helpful by a neighbour',
       refType: 'helpful',
-      refId: voteId,
+      refId: `${replyId}_${voterHandle}`,
       isAction: true,
     });
   }
