@@ -3,7 +3,7 @@ import { Env, Variables } from '../../types';
 import { authMiddleware, hashToken } from '../../middleware/auth';
 import { getDatabase } from '../../db/db_context';
 import { Fast2SmsService } from '../../services/fast2sms_service';
-import { executeDeleteAccount } from '../account/delete_account_service';
+import { orchestrateAccountDeletion } from '../account_deletion';
 
 const authApp = new Hono<{ Bindings: Env; Variables: Variables }>();
 
@@ -588,7 +588,11 @@ authApp.delete('/account', authMiddleware, async (c) => {
   const user = c.get('user');
   const db = getDatabase(c);
 
-  const result = await executeDeleteAccount(db, user.userHandle, user.installationId);
+  const result = await orchestrateAccountDeletion(
+    db,
+    user.userHandle,
+    user.installationId
+  );
   if (!result.success) {
     return c.json(result, 500);
   }

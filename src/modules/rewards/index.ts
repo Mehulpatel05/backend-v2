@@ -117,8 +117,8 @@ export async function checkAndAwardBadges(db: any, userHandle: string): Promise<
     await awardBadgeIfNew(db, clean, 'local_hero');
   }
 
-  const soldCountRow = await db.prepare("SELECT COUNT(*) as count FROM bazar_listings WHERE seller_handle = ? AND status = 'sold'")
-    .bind(clean).first() as any;
+  const soldCountRow = await db.prepare("SELECT COUNT(*) as count FROM bazar_listings WHERE (seller_handle = ? OR seller_handle = ?) AND is_active = 0")
+    .bind(clean, `@${clean}`).first() as any;
   const soldCount = soldCountRow?.count ?? 0;
   if (soldCount >= 5) {
     await awardBadgeIfNew(db, clean, 'top_seller');
@@ -183,8 +183,8 @@ rewardsApp.get('/me', authMiddleware, async (c) => {
     .bind(clean).first() as any;
   const helpfulVotes = helpfulCountRow?.count ?? 0;
 
-  const soldCountRow = await db.prepare("SELECT COUNT(*) as count FROM bazar_listings WHERE seller_handle = ? AND status = 'sold'")
-    .bind(clean).first() as any;
+  const soldCountRow = await db.prepare("SELECT COUNT(*) as count FROM bazar_listings WHERE (seller_handle = ? OR seller_handle = ?) AND is_active = 0")
+    .bind(clean, `@${clean}`).first() as any;
   const soldCount = soldCountRow?.count ?? 0;
 
   let highestHelpfulBadge: string | null = null;
@@ -259,8 +259,8 @@ rewardsApp.get('/badges', authMiddleware, async (c) => {
     .bind(clean).first() as any;
   const helpfulVotes = helpfulCountRow?.count ?? 0;
 
-  const soldCountRow = await db.prepare("SELECT COUNT(*) as count FROM bazar_listings WHERE seller_handle = ? AND status = 'sold'")
-    .bind(clean).first() as any;
+  const soldCountRow = await db.prepare("SELECT COUNT(*) as count FROM bazar_listings WHERE (seller_handle = ? OR seller_handle = ?) AND is_active = 0")
+    .bind(clean, `@${clean}`).first() as any;
   const soldCount = soldCountRow?.count ?? 0;
 
   const allBadges = [

@@ -505,12 +505,12 @@ adminFoundingApp.post('/requests/:id/approve', async (c) => {
     // 4. Add/Update founding_neighbour badge in user_badges
     try {
       const badgeKey = 'founding_neighbour';
-      const badgeTitle = `Founding Neighbour #${nextSeq}`;
+      const badgeId = `bdg_${badgeKey}_${targetUser}`;
       await db.prepare(`
-        INSERT INTO user_badges (user_handle, badge_key, earned_at)
-        VALUES (?, ?, CURRENT_TIMESTAMP)
+        INSERT INTO user_badges (id, user_handle, badge_key, earned_at)
+        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
         ON CONFLICT(user_handle, badge_key) DO UPDATE SET earned_at = CURRENT_TIMESTAMP
-      `).bind(targetUser, badgeKey).run();
+      `).bind(badgeId, targetUser, badgeKey).run();
     } catch (_) {}
 
     // 5. Insert notification

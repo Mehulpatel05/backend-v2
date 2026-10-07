@@ -17,7 +17,7 @@ import { feedbackApp } from './modules/feedback';
 import { adminApp } from './modules/admin';
 import { rewardsApp } from './modules/rewards';
 import { foundingApp, adminFoundingApp } from './modules/founding';
-import { accountApp } from './modules/account';
+import { accountDeletionApp } from './modules/account_deletion';
 import { authMiddleware } from './middleware/auth';
 import { getDatabase } from './db/db_context';
 
@@ -87,8 +87,8 @@ app.post('/users/fcm-token', authMiddleware, handleFcmToken);
 app.route('/api/v2/auth', authApp);
 app.route('/auth', authApp);
 
-app.route('/api/v2/account', accountApp);
-app.route('/account', accountApp);
+app.route('/api/v2/account', accountDeletionApp);
+app.route('/account', accountDeletionApp);
 
 app.route('/api/v2/profile', profileApp);
 app.route('/profile', profileApp);

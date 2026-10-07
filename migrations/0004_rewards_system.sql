@@ -106,10 +106,12 @@ CREATE INDEX IF NOT EXISTS idx_user_coupons_user ON user_coupons(user_handle);
 
 CREATE TABLE IF NOT EXISTS area_founders (
     area_id TEXT NOT NULL,
-    user_handle TEXT NOT NULL,
-    seq_num INTEGER NOT NULL,
+    user_id TEXT NOT NULL,
+    seq INTEGER NOT NULL CHECK(seq >= 1 AND seq <= 100),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY(area_id, user_handle)
+    PRIMARY KEY(area_id, user_id),
+    UNIQUE(area_id, seq)
 );
 
-CREATE INDEX IF NOT EXISTS idx_area_founders ON area_founders(area_id);
+CREATE INDEX IF NOT EXISTS idx_area_founders_area ON area_founders(area_id, seq ASC);
+CREATE INDEX IF NOT EXISTS idx_area_founders_user ON area_founders(user_id);
