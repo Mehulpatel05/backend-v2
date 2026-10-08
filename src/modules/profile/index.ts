@@ -219,6 +219,36 @@ profileApp.put('/', authMiddleware, async (c) => {
       );
       await Promise.allSettled(optionalUpdates);
 
+      try {
+        const userChats = await db.prepare(
+          'SELECT id, canonical_id, user1_handle, user2_handle FROM chats WHERE LOWER(user1_handle) = ? OR LOWER(user2_handle) = ?'
+        ).bind(cleanNewHandle, cleanNewHandle).all() as any;
+
+        for (const chat of userChats?.results || []) {
+          const u1 = (chat.user1_handle || '').replace(/^@+/, '').trim().toLowerCase();
+          const u2 = (chat.user2_handle || '').replace(/^@+/, '').trim().toLowerCase();
+          const targetCanonical = [u1, u2].sort().join('_');
+
+          if (chat.canonical_id !== targetCanonical || chat.id !== targetCanonical) {
+            const existing = await db.prepare(
+              'SELECT id FROM chats WHERE canonical_id = ? OR id = ? LIMIT 1'
+            ).bind(targetCanonical, targetCanonical).first() as any;
+
+            await db.prepare('UPDATE chat_messages SET chat_id = ? WHERE chat_id = ? OR chat_id = ?')
+              .bind(targetCanonical, chat.id, chat.canonical_id)
+              .run();
+
+            if (existing) {
+              await db.prepare('DELETE FROM chats WHERE id = ?').bind(chat.id).run();
+            } else {
+              await db.prepare('UPDATE chats SET id = ?, canonical_id = ? WHERE id = ?')
+                .bind(targetCanonical, targetCanonical, chat.id)
+                .run();
+            }
+          }
+        }
+      } catch (_) {}
+
       handleChanged = true;
       targetHandle = cleanNewHandle;
     }

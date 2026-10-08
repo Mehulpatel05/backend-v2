@@ -46,11 +46,23 @@ chatApp.get('/', authMiddleware, async (c) => {
     .bind(myHandle, myHandle, myHandle, myHandle, myHandle)
     .all();
 
-  const formatted = (results || []).map((row: any) => {
+  const formatted: any[] = [];
+  const seenPartners = new Set<string>();
+
+  for (const row of results || []) {
     const u1 = (row.user1_handle || '').replace(/^@+/, '').trim();
     const u2 = (row.user2_handle || '').replace(/^@+/, '').trim();
     const isUser1 = u1.toLowerCase() === myHandle;
     const otherUser = isUser1 ? u2 : u1;
+    const partnerKey = otherUser.toLowerCase();
+
+    if (!partnerKey || partnerKey === myHandle) continue;
+
+    if (seenPartners.has(partnerKey)) {
+      continue;
+    }
+    seenPartners.add(partnerKey);
+
     const otherDisplayName = (row.other_display_name || otherUser).replace(/^@+/, '').trim();
     const unreadCount = isUser1 ? row.unread_count_user1 : row.unread_count_user2;
     const isFounder = row.founder_seq != null && row.founder_seq > 0;
@@ -58,7 +70,7 @@ chatApp.get('/', authMiddleware, async (c) => {
     const isVerified = isFounder || isVerifiedCitizen;
     const authorBadge = isFounder ? `FOUNDING #${row.founder_seq}` : (isVerifiedCitizen ? 'VERIFIED' : null);
 
-    return {
+    formatted.push({
       id: row.id,
       chatId: row.canonical_id || row.id,
       canonicalId: row.canonical_id || row.id,
@@ -81,8 +93,8 @@ chatApp.get('/', authMiddleware, async (c) => {
       lastTimestamp: row.last_timestamp || Date.now(),
       unreadCount: unreadCount || 0,
       updatedAt: row.updated_at,
-    };
-  });
+    });
+  }
 
   return c.json({
     success: true,
