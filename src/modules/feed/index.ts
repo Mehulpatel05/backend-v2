@@ -94,8 +94,10 @@ function formatPostRow(row: any, userVote: number = 0) {
 
 // Handler for getting feed posts
 async function handleGetPosts(c: any) {
-  const limit = parseInt(c.req.query('limit') || '50');
-  const offset = parseInt(c.req.query('offset') || '0');
+  const rawLimit = parseInt(c.req.query('limit') || '50', 10);
+  const limit = isNaN(rawLimit) ? 50 : Math.min(Math.max(rawLimit, 1), 100);
+  const rawOffset = parseInt(c.req.query('offset') || '0', 10);
+  const offset = isNaN(rawOffset) ? 0 : Math.max(rawOffset, 0);
   const category = c.req.query('category');
   const cityId = c.req.query('cityId') || c.req.query('city_id');
   const areaId = c.req.query('areaId') || c.req.query('area_id');
@@ -117,8 +119,13 @@ async function handleGetPosts(c: any) {
   }
 
   if (cityId && cityId.toUpperCase() !== 'ALL') {
-    query += ' AND (LOWER(p.city_id) = LOWER(?) OR p.city_id = "" OR p.city_id IS NULL)';
+    query += ' AND LOWER(p.city_id) = LOWER(?)';
     params.push(cityId);
+  }
+
+  if (areaId && areaId.toUpperCase() !== 'ALL') {
+    query += ' AND LOWER(p.area_id) = LOWER(?)';
+    params.push(areaId);
   }
 
   if (author) {
@@ -126,7 +133,6 @@ async function handleGetPosts(c: any) {
     query += ' AND (p.author_handle = ? OR p.author_handle = ?)';
     params.push(cleanAuthor, `@${cleanAuthor}`);
   }
-
 
   if (cursor) {
     query += ' AND p.created_at < ?';
@@ -176,11 +182,15 @@ async function handleCreatePost(c: any) {
   const cityId = body.cityId || body.city_id || '';
   const areaId = body.areaId || body.area_id || '';
   const areaName = body.areaName || body.area_name || '';
-  const lat = body.lat ? Number(body.lat) : null;
-  const lng = body.lng ? Number(body.lng) : null;
+  const lat = (body.lat !== undefined && body.lat !== null && body.lat !== '') ? Number(body.lat) : null;
+  const lng = (body.lng !== undefined && body.lng !== null && body.lng !== '') ? Number(body.lng) : null;
 
   if (!content && mediaUrls.length === 0 && !imageUrl) {
     return c.json({ success: false, error: 'Post must contain text or media' }, 400);
+  }
+
+  if (content.length > 5000) {
+    return c.json({ success: false, error: 'Post content exceeds 5000 characters limit' }, 400);
   }
 
   const postId = `post_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`;
@@ -247,6 +257,7 @@ async function handleCreatePost(c: any) {
 
   let pointsAwarded = 0;
   let dailyCapReached = false;
+  let newBalance: number | undefined;
 
   if (content.length >= 20 && category !== 'safety' && category !== 'urgent_safety') {
     try {
@@ -260,6 +271,7 @@ async function handleCreatePost(c: any) {
       });
       pointsAwarded = rewardResult.awardedDelta;
       dailyCapReached = rewardResult.capReached ?? false;
+      newBalance = rewardResult.newBalance;
 
       const pendingRef = await db.prepare("SELECT * FROM referrals WHERE invitee_handle = ? AND status = 'pending'")
         .bind(cleanHandle).first() as any;
@@ -292,6 +304,7 @@ async function handleCreatePost(c: any) {
     postId,
     pointsAwarded,
     dailyCapReached,
+    newBalance,
     post: {
       id: postId,
       authorHandle: cleanHandle,
@@ -316,7 +329,23 @@ async function handlePostVote(c: any) {
   const user = c.get('user');
   const postId = c.req.param('id');
   const body = await c.req.json().catch(() => ({}));
-  const voteType = Number(body.voteType ?? body.type ?? 1); // 1 = upvote, -1 = downvote, 0 = remove
+
+  let voteType = 1;
+  if (body.voteType !== undefined) {
+    voteType = Number(body.voteType);
+  } else if (body.type !== undefined) {
+    voteType = Number(body.type);
+  } else if (body.direction !== undefined) {
+    if (typeof body.direction === 'string') {
+      const dir = body.direction.toLowerCase();
+      if (dir === 'up' || dir === '1') voteType = 1;
+      else if (dir === 'down' || dir === '-1') voteType = -1;
+      else if (dir === 'none' || dir === '0' || dir === 'clear') voteType = 0;
+      else voteType = Number(body.direction) || 0;
+    } else {
+      voteType = Number(body.direction);
+    }
+  }
 
   const db = getDatabase(c);
   const cleanHandle = user.userHandle;
@@ -330,44 +359,55 @@ async function handlePostVote(c: any) {
   if (voteType === 0) {
     if (existingVote) {
       const prevType = existingVote.vote_type;
-      await db.batch([
-        db.prepare('DELETE FROM post_votes WHERE post_id = ? AND user_handle = ?').bind(postId, cleanHandle),
-        prevType === 1
-          ? db.prepare('UPDATE feed_posts SET upvotes = MAX(0, upvotes - 1), likes_count = MAX(0, likes_count - 1) WHERE id = ?').bind(postId)
-          : db.prepare('UPDATE feed_posts SET downvotes = MAX(0, downvotes - 1) WHERE id = ?').bind(postId),
-      ]);
+      const delRes = await db.prepare('DELETE FROM post_votes WHERE post_id = ? AND user_handle = ?').bind(postId, cleanHandle).run();
+      if (delRes.meta?.changes === 1) {
+        if (prevType === 1) {
+          await db.prepare('UPDATE feed_posts SET upvotes = MAX(0, upvotes - 1), likes_count = MAX(0, likes_count - 1) WHERE id = ?').bind(postId).run();
+        } else {
+          await db.prepare('UPDATE feed_posts SET downvotes = MAX(0, downvotes - 1) WHERE id = ?').bind(postId).run();
+        }
+      }
     }
     return c.json({ success: true, userVote: 0 });
   } else {
-    const voteId = `vote_${Date.now()}`;
+    const voteId = `vote_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`;
     if (existingVote) {
       if (existingVote.vote_type === voteType) {
         // Toggle off
-        await db.batch([
-          db.prepare('DELETE FROM post_votes WHERE post_id = ? AND user_handle = ?').bind(postId, cleanHandle),
-          voteType === 1
-            ? db.prepare('UPDATE feed_posts SET upvotes = MAX(0, upvotes - 1), likes_count = MAX(0, likes_count - 1) WHERE id = ?').bind(postId)
-            : db.prepare('UPDATE feed_posts SET downvotes = MAX(0, downvotes - 1) WHERE id = ?').bind(postId),
-        ]);
+        const delRes = await db.prepare('DELETE FROM post_votes WHERE post_id = ? AND user_handle = ?').bind(postId, cleanHandle).run();
+        if (delRes.meta?.changes === 1) {
+          if (voteType === 1) {
+            await db.prepare('UPDATE feed_posts SET upvotes = MAX(0, upvotes - 1), likes_count = MAX(0, likes_count - 1) WHERE id = ?').bind(postId).run();
+          } else {
+            await db.prepare('UPDATE feed_posts SET downvotes = MAX(0, downvotes - 1) WHERE id = ?').bind(postId).run();
+          }
+        }
         return c.json({ success: true, userVote: 0 });
       } else {
         // Flip vote
-        await db.batch([
-          db.prepare('UPDATE post_votes SET vote_type = ? WHERE post_id = ? AND user_handle = ?').bind(voteType, postId, cleanHandle),
-          voteType === 1
-            ? db.prepare('UPDATE feed_posts SET upvotes = upvotes + 1, likes_count = likes_count + 1, downvotes = MAX(0, downvotes - 1) WHERE id = ?').bind(postId)
-            : db.prepare('UPDATE feed_posts SET downvotes = downvotes + 1, upvotes = MAX(0, upvotes - 1), likes_count = MAX(0, likes_count - 1) WHERE id = ?').bind(postId),
-        ]);
+        const updateRes = await db.prepare('UPDATE post_votes SET vote_type = ? WHERE post_id = ? AND user_handle = ?').bind(voteType, postId, cleanHandle).run();
+        if (updateRes.meta?.changes === 1) {
+          if (voteType === 1) {
+            await db.prepare('UPDATE feed_posts SET upvotes = upvotes + 1, likes_count = likes_count + 1, downvotes = MAX(0, downvotes - 1) WHERE id = ?').bind(postId).run();
+          } else {
+            await db.prepare('UPDATE feed_posts SET downvotes = downvotes + 1, upvotes = MAX(0, upvotes - 1), likes_count = MAX(0, likes_count - 1) WHERE id = ?').bind(postId).run();
+          }
+        }
         return c.json({ success: true, userVote: voteType });
       }
     } else {
       // New vote with ON CONFLICT safety
-      await db.batch([
-        db.prepare('INSERT INTO post_votes (id, post_id, user_handle, vote_type) VALUES (?, ?, ?, ?) ON CONFLICT(post_id, user_handle) DO UPDATE SET vote_type = excluded.vote_type').bind(voteId, postId, cleanHandle, voteType),
-        voteType === 1
-          ? db.prepare('UPDATE feed_posts SET upvotes = upvotes + 1, likes_count = likes_count + 1 WHERE id = ?').bind(postId)
-          : db.prepare('UPDATE feed_posts SET downvotes = downvotes + 1 WHERE id = ?').bind(postId),
-      ]);
+      const insertRes = await db.prepare(
+        'INSERT INTO post_votes (id, post_id, user_handle, vote_type) VALUES (?, ?, ?, ?) ON CONFLICT(post_id, user_handle) DO UPDATE SET vote_type = excluded.vote_type'
+      ).bind(voteId, postId, cleanHandle, voteType).run();
+
+      if (insertRes.meta?.changes === 1) {
+        if (voteType === 1) {
+          await db.prepare('UPDATE feed_posts SET upvotes = upvotes + 1, likes_count = likes_count + 1 WHERE id = ?').bind(postId).run();
+        } else {
+          await db.prepare('UPDATE feed_posts SET downvotes = downvotes + 1 WHERE id = ?').bind(postId).run();
+        }
+      }
 
       // Send like notification to post author (only for upvotes, not self-likes)
       if (voteType === 1) {
@@ -385,7 +425,7 @@ async function handlePostVote(c: any) {
               likerHandle,
             };
             await db.prepare(
-              `INSERT INTO notifications (id, target_handle, sender_handle, type, title, body, data_json, is_read, created_at)
+              `INSERT INTO notifications (id, target_handle, sender_handle, type, title, body, payload_json, is_read, created_at)
                VALUES (?, ?, ?, 'post_like', ?, ?, ?, 0, CURRENT_TIMESTAMP)`
             ).bind(
               notifId,
@@ -418,29 +458,26 @@ feedApp.post('/:id/vote', authMiddleware, handlePostVote);
 feedApp.post('/posts/:id/vote', authMiddleware, handlePostVote);
 
 // 4. Like Post (Legacy compatibility)
-feedApp.post('/:id/like', authMiddleware, async (c) => {
+// 4. Like Post (Legacy compatibility)
+async function handlePostLike(c: any) {
   const user = c.get('user');
   const postId = c.req.param('id');
   const db = getDatabase(c);
 
   const existing = await db.prepare(
-    'SELECT id FROM feed_likes WHERE post_id = ? AND user_handle = ? LIMIT 1'
+    'SELECT id FROM feed_likes WHERE post_id = ? AND (user_handle = ? OR user_handle = ?) LIMIT 1'
   )
-    .bind(postId, user.userHandle)
+    .bind(postId, user.userHandle, `@${user.userHandle}`)
     .first();
 
   if (existing) {
-    await db.batch([
-      db.prepare('DELETE FROM feed_likes WHERE post_id = ? AND user_handle = ?').bind(postId, user.userHandle),
-      db.prepare('UPDATE feed_posts SET likes_count = MAX(0, likes_count - 1), upvotes = MAX(0, upvotes - 1) WHERE id = ?').bind(postId),
-    ]);
+    await db.prepare('DELETE FROM feed_likes WHERE post_id = ? AND (user_handle = ? OR user_handle = ?)').bind(postId, user.userHandle, `@${user.userHandle}`).run();
+    await db.prepare('UPDATE feed_posts SET likes_count = MAX(0, likes_count - 1), upvotes = MAX(0, upvotes - 1) WHERE id = ?').bind(postId).run();
     return c.json({ success: true, isLiked: false, message: 'Post unliked' });
   } else {
     const likeId = `like_${Date.now()}`;
-    await db.batch([
-      db.prepare('INSERT INTO feed_likes (id, post_id, user_handle) VALUES (?, ?, ?) ON CONFLICT(post_id, user_handle) DO NOTHING').bind(likeId, postId, user.userHandle),
-      db.prepare('UPDATE feed_posts SET likes_count = likes_count + 1, upvotes = upvotes + 1 WHERE id = ?').bind(postId),
-    ]);
+    await db.prepare('INSERT INTO feed_likes (id, post_id, user_handle) VALUES (?, ?, ?) ON CONFLICT(post_id, user_handle) DO NOTHING').bind(likeId, postId, user.userHandle).run();
+    await db.prepare('UPDATE feed_posts SET likes_count = likes_count + 1, upvotes = upvotes + 1 WHERE id = ?').bind(postId).run();
 
     // Notify post author about the like
     try {
@@ -452,12 +489,12 @@ feedApp.post('/:id/like', authMiddleware, async (c) => {
         const notifId = `notif_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`;
         const payload = { type: 'post_like', postId: postId || '', senderHandle: likerHandle, likerHandle };
         await db.prepare(
-          `INSERT INTO notifications (id, target_handle, sender_handle, type, title, body, data_json, is_read, created_at)
+          `INSERT INTO notifications (id, target_handle, sender_handle, type, title, body, payload_json, is_read, created_at)
            VALUES (?, ?, ?, 'post_like', ?, ?, ?, 0, CURRENT_TIMESTAMP)`
         ).bind(notifId, authorHandle, likerHandle, `Nearhood`, `@${likerHandle} liked your post 👍`, JSON.stringify(payload)).run();
         sendPushNotification({
           targetHandle: authorHandle,
-          title: `Nearhood`,
+          title: 'Nearhood',
           body: `@${likerHandle} liked your post 👍`,
           data: payload,
           channelId: 'nearhood_channel',
@@ -468,10 +505,10 @@ feedApp.post('/:id/like', authMiddleware, async (c) => {
 
     return c.json({ success: true, isLiked: true, message: 'Post liked' });
   }
-});
-feedApp.post('/posts/:id/like', authMiddleware, async (c) => {
-  return feedApp.fetch(c.req.raw, c.env, c.executionCtx);
-});
+}
+
+feedApp.post('/:id/like', authMiddleware, handlePostLike);
+feedApp.post('/posts/:id/like', authMiddleware, handlePostLike);
 
 // 5. Comments
 async function handleGetComments(c: any) {
@@ -527,8 +564,17 @@ async function handleAddComment(c: any) {
     return c.json({ success: false, error: 'Comment content cannot be empty' }, 400);
   }
 
-  const commentId = `comment_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`;
+  if (content.length > 1000) {
+    return c.json({ success: false, error: 'Comment cannot exceed 1000 characters' }, 400);
+  }
+
   const db = getDatabase(c);
+  const post = (await db.prepare('SELECT id, author_handle, status FROM feed_posts WHERE id = ? LIMIT 1').bind(postId).first()) as any;
+  if (!post || post.status === 'deleted') {
+    return c.json({ success: false, error: 'Post not found or deleted' }, 404);
+  }
+
+  const commentId = `comment_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`;
 
   await db.batch([
     db.prepare('INSERT INTO feed_comments (id, post_id, author_handle, content) VALUES (?, ?, ?, ?)').bind(
@@ -542,6 +588,7 @@ async function handleAddComment(c: any) {
 
   let pointsAwarded = 0;
   let dailyCapReached = false;
+  let newBalance: number | undefined;
 
   if (content.length >= 10) {
     try {
@@ -560,6 +607,7 @@ async function handleAddComment(c: any) {
         });
         pointsAwarded = rewardResult.awardedDelta;
         dailyCapReached = rewardResult.capReached ?? false;
+        newBalance = rewardResult.newBalance;
       }
     } catch (_) {}
   }
@@ -569,8 +617,9 @@ async function handleAddComment(c: any) {
     commentId,
     pointsAwarded,
     dailyCapReached,
+    newBalance,
     message: 'Comment added successfully',
-  });
+  }, 201);
 }
 
 feedApp.post('/:id/comments', authMiddleware, handleAddComment);
@@ -587,7 +636,7 @@ async function handleReportPost(c: any) {
   const db = getDatabase(c);
 
   try {
-    const post = (await db.prepare('SELECT report_count, reporters_json FROM feed_posts WHERE id = ? LIMIT 1')
+    const post = (await db.prepare('SELECT status, report_count, reporters_json FROM feed_posts WHERE id = ? LIMIT 1')
       .bind(postId)
       .first()) as any;
 
@@ -600,12 +649,19 @@ async function handleReportPost(c: any) {
       reporters = JSON.parse(post.reporters_json || '[]');
     } catch (_) {}
 
-    if (!reporters.includes(user.userHandle)) {
-      reporters.push(user.userHandle);
+    const cleanUser = (user.userHandle || '').replace(/^@+/, '').trim().toLowerCase();
+    if (reporters.map((r: string) => r.replace(/^@+/, '').trim().toLowerCase()).includes(cleanUser)) {
+      return c.json({
+        success: true,
+        reportCount: post.report_count || 0,
+        status: post.status,
+        message: 'You have already reported this post',
+      });
     }
 
+    reporters.push(cleanUser);
     const newReportCount = (post.report_count || 0) + 1;
-    const newStatus = newReportCount >= 5 ? 'flagged' : 'active';
+    const newStatus = newReportCount >= 5 ? 'flagged' : (post.status || 'active');
 
     await db.prepare('UPDATE feed_posts SET report_count = ?, reporters_json = ?, status = ? WHERE id = ?')
       .bind(newReportCount, JSON.stringify(reporters), newStatus, postId)
@@ -627,10 +683,26 @@ feedApp.post('/posts/:id/report', authMiddleware, handleReportPost);
 
 // 7. Restore Post
 async function handleRestorePost(c: any) {
+  const user = c.get('user');
   const postId = c.req.param('id');
   const db = getDatabase(c);
 
-  await db.prepare('UPDATE feed_posts SET status = "active", report_count = 0 WHERE id = ?')
+  const post = (await db.prepare('SELECT author_handle FROM feed_posts WHERE id = ? LIMIT 1')
+    .bind(postId)
+    .first()) as any;
+
+  if (!post) {
+    return c.json({ success: false, error: 'Post not found' }, 404);
+  }
+
+  const cleanAuthor = (post.author_handle || '').replace(/^@+/, '').trim().toLowerCase();
+  const cleanUser = (user.userHandle || '').replace(/^@+/, '').trim().toLowerCase();
+
+  if (cleanUser !== cleanAuthor) {
+    return c.json({ success: false, error: 'Forbidden: You can only restore your own post' }, 403);
+  }
+
+  await db.prepare('UPDATE feed_posts SET status = "active", report_count = 0, reporters_json = "[]" WHERE id = ?')
     .bind(postId)
     .run();
 
@@ -672,17 +744,25 @@ feedApp.post('/:id/mark-sold', authMiddleware, handleMarkSold);
 
 // 9. Toggle Recommend Service
 async function handleToggleRecommend(c: any) {
+  const user = c.get('user');
   const postId = c.req.param('id');
   const db = getDatabase(c);
 
-  await db.prepare('UPDATE feed_posts SET upvotes = upvotes + 1 WHERE id = ?')
-    .bind(postId)
-    .run();
+  const cleanUser = (user.userHandle || '').replace(/^@+/, '').trim().toLowerCase();
+  const existing = await db.prepare(
+    'SELECT id FROM feed_likes WHERE post_id = ? AND (LOWER(user_handle) = ? OR LOWER(user_handle) = ?)'
+  ).bind(postId, cleanUser, `@${cleanUser}`).first();
 
-  return c.json({
-    success: true,
-    message: 'Recommendation updated',
-  });
+  if (existing) {
+    await db.prepare('DELETE FROM feed_likes WHERE post_id = ? AND (LOWER(user_handle) = ? OR LOWER(user_handle) = ?)').bind(postId, cleanUser, `@${cleanUser}`).run();
+    await db.prepare('UPDATE feed_posts SET upvotes = MAX(0, upvotes - 1), likes_count = MAX(0, likes_count - 1) WHERE id = ?').bind(postId).run();
+    return c.json({ success: true, isRecommended: false, message: 'Recommendation removed' });
+  } else {
+    await db.prepare('INSERT INTO feed_likes (id, post_id, user_handle) VALUES (?, ?, ?) ON CONFLICT(post_id, user_handle) DO NOTHING')
+      .bind(`rec_${Date.now()}`, postId, cleanUser).run();
+    await db.prepare('UPDATE feed_posts SET upvotes = upvotes + 1, likes_count = likes_count + 1 WHERE id = ?').bind(postId).run();
+    return c.json({ success: true, isRecommended: true, message: 'Recommendation added' });
+  }
 }
 
 feedApp.post('/:id/recommend', authMiddleware, handleToggleRecommend);
@@ -690,21 +770,31 @@ feedApp.post('/posts/:id/recommend', authMiddleware, handleToggleRecommend);
 
 // 10. Toggle Event RSVP
 async function handleToggleRsvp(c: any) {
+  const user = c.get('user');
   const postId = c.req.param('id');
   const body = await c.req.json().catch(() => ({}));
   const isRsvped = body.isRsvped !== false;
   const db = getDatabase(c);
 
-  const delta = isRsvped ? 1 : -1;
-  await db.prepare('UPDATE feed_posts SET upvotes = MAX(0, upvotes + ?) WHERE id = ?')
-    .bind(delta, postId)
-    .run();
+  const cleanUser = (user.userHandle || '').replace(/^@+/, '').trim().toLowerCase();
+  const existing = await db.prepare(
+    'SELECT id FROM feed_likes WHERE post_id = ? AND (LOWER(user_handle) = ? OR LOWER(user_handle) = ?)'
+  ).bind(postId, cleanUser, `@${cleanUser}`).first();
 
-  return c.json({
-    success: true,
-    isRsvped,
-    message: isRsvped ? 'RSVP confirmed' : 'RSVP cancelled',
-  });
+  if (isRsvped) {
+    if (!existing) {
+      await db.prepare('INSERT INTO feed_likes (id, post_id, user_handle) VALUES (?, ?, ?) ON CONFLICT(post_id, user_handle) DO NOTHING')
+        .bind(`rsvp_${Date.now()}`, postId, cleanUser).run();
+      await db.prepare('UPDATE feed_posts SET upvotes = upvotes + 1 WHERE id = ?').bind(postId).run();
+    }
+    return c.json({ success: true, isRsvped: true, message: 'RSVP confirmed' });
+  } else {
+    if (existing) {
+      await db.prepare('DELETE FROM feed_likes WHERE post_id = ? AND (LOWER(user_handle) = ? OR LOWER(user_handle) = ?)').bind(postId, cleanUser, `@${cleanUser}`).run();
+      await db.prepare('UPDATE feed_posts SET upvotes = MAX(0, upvotes - 1) WHERE id = ?').bind(postId).run();
+    }
+    return c.json({ success: true, isRsvped: false, message: 'RSVP cancelled' });
+  }
 }
 
 feedApp.post('/:id/rsvp', authMiddleware, handleToggleRsvp);

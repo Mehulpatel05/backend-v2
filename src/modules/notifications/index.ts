@@ -5,28 +5,12 @@ import { getDatabase } from '../../db/db_context';
 
 const notificationsApp = new Hono<{ Bindings: Env; Variables: Variables }>();
 
-// 1. Get User Notifications (Supports authMiddleware session OR ?handle= query param OR x-user-handle header)
+notificationsApp.use('/*', authMiddleware);
+
+// 1. Get User Notifications for current authenticated user
 notificationsApp.get('/', async (c) => {
-  const queryHandle = c.req.query('handle') || c.req.header('x-user-handle') || c.req.header('user-handle') || '';
-  let targetHandle = queryHandle.replace(/^@+/, '').trim().toLowerCase();
-
-  if (!targetHandle) {
-    // Try auth middleware context if available
-    const authHeader = c.req.header('Authorization');
-    if (authHeader) {
-      try {
-        await authMiddleware(c as any, async () => {});
-        const user = c.get('user');
-        if (user?.userHandle) {
-          targetHandle = user.userHandle.replace(/^@+/, '').trim().toLowerCase();
-        }
-      } catch (_) {}
-    }
-  }
-
-  if (!targetHandle) {
-    return c.json({ success: false, error: 'User handle is required' }, 400);
-  }
+  const user = c.get('user');
+  const targetHandle = user.userHandle.replace(/^@+/, '').trim().toLowerCase();
 
   const limit = Math.min(parseInt(c.req.query('limit') || '50', 10), 100);
   const db = getDatabase(c);
@@ -40,7 +24,6 @@ notificationsApp.get('/', async (c) => {
     .all();
 
   const formatted = (results || []).map((row: any) => {
-    // Support both data_json (chat/friends writes) and payload_json (legacy writes)
     let payload = {};
     try {
       const fromDataJson = JSON.parse(row.data_json || '{}');
@@ -71,13 +54,13 @@ notificationsApp.get('/', async (c) => {
   });
 });
 
-// 2. Dispatch / Send In-App Notification
+// 2. Dispatch / Send In-App Notification (authenticated caller is sender)
 notificationsApp.post('/', async (c) => {
+  const user = c.get('user');
+  const senderHandle = user.userHandle.replace(/^@+/, '').trim().toLowerCase();
   const body = await c.req.json().catch(() => ({}));
   const rawTarget = body.target_handle || body.targetHandle || body.receiver || '';
   const targetHandle = rawTarget.replace(/^@+/, '').trim().toLowerCase();
-  const rawSender = body.sender_handle || body.senderHandle || body.sender || '';
-  const senderHandle = rawSender.replace(/^@+/, '').trim().toLowerCase();
   const title = body.title || 'Nearhood';
   const notifBody = body.body || body.message || '';
   const type = body.type || 'general';
@@ -91,7 +74,7 @@ notificationsApp.post('/', async (c) => {
   const notifId = `notif_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`;
 
   await db.prepare(
-    `INSERT INTO notifications (id, target_handle, sender_handle, type, title, body, data_json, is_read, created_at)
+    `INSERT INTO notifications (id, target_handle, sender_handle, type, title, body, payload_json, is_read, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP)`
   )
     .bind(
@@ -112,39 +95,29 @@ notificationsApp.post('/', async (c) => {
   });
 });
 
-// 3. Mark Notification as Read
+// 3. Mark Notification as Read for authenticated user
 notificationsApp.post('/:id/read', async (c) => {
+  const user = c.get('user');
+  const myHandle = user.userHandle.replace(/^@+/, '').trim().toLowerCase();
   const id = c.req.param('id');
-  const body = await c.req.json().catch(() => ({}));
-  const rawHandle = body.handle || body.user_handle || c.req.header('x-user-handle') || '';
-  const handle = rawHandle.replace(/^@+/, '').trim().toLowerCase();
   const db = getDatabase(c);
 
-  if (handle) {
-    await db.prepare('UPDATE notifications SET is_read = 1 WHERE id = ? AND LOWER(target_handle) = ?')
-      .bind(id, handle)
-      .run();
-  } else {
-    await db.prepare('UPDATE notifications SET is_read = 1 WHERE id = ?')
-      .bind(id)
-      .run();
-  }
+  await db.prepare('UPDATE notifications SET is_read = 1 WHERE id = ? AND LOWER(target_handle) = ?')
+    .bind(id, myHandle)
+    .run();
 
   return c.json({ success: true, message: 'Notification marked as read' });
 });
 
-// 4. Mark All Notifications as Read for User
+// 4. Mark All Notifications as Read for authenticated user
 notificationsApp.post('/read-all', async (c) => {
-  const body = await c.req.json().catch(() => ({}));
-  const rawHandle = body.handle || body.user_handle || c.req.header('x-user-handle') || '';
-  const handle = rawHandle.replace(/^@+/, '').trim().toLowerCase();
+  const user = c.get('user');
+  const myHandle = user.userHandle.replace(/^@+/, '').trim().toLowerCase();
   const db = getDatabase(c);
 
-  if (handle) {
-    await db.prepare('UPDATE notifications SET is_read = 1 WHERE LOWER(target_handle) = ?')
-      .bind(handle)
-      .run();
-  }
+  await db.prepare('UPDATE notifications SET is_read = 1 WHERE LOWER(target_handle) = ?')
+    .bind(myHandle)
+    .run();
 
   return c.json({ success: true, message: 'All notifications marked as read' });
 });

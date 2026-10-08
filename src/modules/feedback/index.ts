@@ -36,10 +36,9 @@ feedbackApp.post('/', authMiddleware, async (c) => {
   } catch (e: any) {
     console.error('[Feedback] Save error:', e);
     return c.json({
-      success: true,
-      feedbackId: id,
-      message: 'Feedback recorded successfully',
-    });
+      success: false,
+      error: 'Failed to submit feedback. Please try again.',
+    }, 500);
   }
 });
 
@@ -47,11 +46,12 @@ feedbackApp.post('/', authMiddleware, async (c) => {
 feedbackApp.get('/my-tickets', authMiddleware, async (c) => {
   const user = c.get('user');
   const db = getDatabase(c);
+  const cleanHandle = (user.userHandle || '').replace(/^@+/, '').trim().toLowerCase();
 
   try {
     const results = await db.prepare(
-      'SELECT id, user_handle, category, feedback_text, app_version, device_info, created_at FROM user_feedback WHERE user_handle = ? ORDER BY created_at DESC LIMIT 50'
-    ).bind(user.userHandle).all();
+      'SELECT id, user_handle, category, feedback_text, app_version, device_info, created_at FROM user_feedback WHERE LOWER(user_handle) = ? OR LOWER(user_handle) = ? ORDER BY created_at DESC LIMIT 50'
+    ).bind(cleanHandle, `@${cleanHandle}`).all();
 
     const tickets = (results.results || []).map((row: any) => {
       const text = row.feedback_text || '';

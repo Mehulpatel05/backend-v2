@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS users (
     phone TEXT UNIQUE NOT NULL,
     handle TEXT UNIQUE NOT NULL,
     is_verified INTEGER DEFAULT 0,
+    is_banned INTEGER DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -33,6 +34,7 @@ CREATE TABLE IF NOT EXISTS devices (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     last_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     revoked_at TIMESTAMP NULL,
+    expires_at TIMESTAMP NULL,
     FOREIGN KEY(user_handle) REFERENCES users(handle) ON DELETE CASCADE
 );
 
@@ -218,6 +220,18 @@ CREATE TABLE IF NOT EXISTS bazar_saved (
 
 CREATE INDEX IF NOT EXISTS idx_bazar_saved_user ON bazar_saved(user_handle);
 
+CREATE TABLE IF NOT EXISTS bazar_saved_shops (
+    id TEXT PRIMARY KEY,
+    user_handle TEXT NOT NULL,
+    shop_id TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(user_handle, shop_id),
+    FOREIGN KEY(user_handle) REFERENCES users(handle) ON DELETE CASCADE,
+    FOREIGN KEY(shop_id) REFERENCES bazar_shops(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_bazar_saved_shops_user ON bazar_saved_shops(user_handle);
+
 CREATE TABLE IF NOT EXISTS chats (
     id TEXT PRIMARY KEY,
     canonical_id TEXT UNIQUE NOT NULL,
@@ -245,6 +259,8 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     media_r2_path TEXT DEFAULT '',
     message_type TEXT DEFAULT 'text',
     is_read INTEGER DEFAULT 0,
+    deleted_by_sender INTEGER DEFAULT 0,
+    deleted_by_receiver INTEGER DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(chat_id) REFERENCES chats(id) ON DELETE CASCADE
 );
@@ -292,7 +308,9 @@ CREATE TABLE IF NOT EXISTS phone_otps (
     request_id TEXT NOT NULL,
     attempts INTEGER DEFAULT 0,
     expires_at TIMESTAMP NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    send_count INTEGER DEFAULT 0,
+    window_started_at TIMESTAMP NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_phone_otps_req ON phone_otps(request_id);
@@ -426,9 +444,79 @@ CREATE TABLE IF NOT EXISTS user_coupons (
 );
 
 CREATE INDEX IF NOT EXISTS idx_user_coupons_user ON user_coupons(user_handle);
+
+CREATE TABLE IF NOT EXISTS user_blocks (
+    id TEXT PRIMARY KEY,
+    blocker_handle TEXT NOT NULL,
+    blocked_handle TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(blocker_handle, blocked_handle)
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_blocks_blocker ON user_blocks(blocker_handle);
+CREATE INDEX IF NOT EXISTS idx_user_blocks_blocked ON user_blocks(blocked_handle);
+
+CREATE TABLE IF NOT EXISTS admin_sessions (
+    token_hash TEXT PRIMARY KEY,
+    admin_username TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    expires_at TIMESTAMP NOT NULL,
+    revoked_at TIMESTAMP NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_admin_sessions_expiry ON admin_sessions(expires_at);
 `;
 
 let schemaInitPromise: Promise<void> | null = null;
+
+/**
+ * Splits a SQL script on statement boundaries, ignoring semicolons that appear
+ * inside single-quoted string literals (e.g. partial-index WHERE clauses).
+ */
+function splitSqlStatements(script: string): string[] {
+  const statements: string[] = [];
+  let current = '';
+  let inString = false;
+
+  for (let i = 0; i < script.length; i++) {
+    const ch = script[i];
+
+    if (ch === "'") {
+      // '' inside a string literal is an escaped quote
+      if (inString && script[i + 1] === "'") {
+        current += "''";
+        i++;
+        continue;
+      }
+      inString = !inString;
+      current += ch;
+      continue;
+    }
+
+    if (ch === ';' && !inString) {
+      const trimmed = current.trim();
+      if (trimmed.length > 0) statements.push(trimmed);
+      current = '';
+      continue;
+    }
+
+    current += ch;
+  }
+
+  const tail = current.trim();
+  if (tail.length > 0) statements.push(tail);
+  return statements;
+}
+
+/** Errors we expect and can safely ignore when (re)applying idempotent DDL. */
+function isBenignDdlError(message: string): boolean {
+  const m = message.toLowerCase();
+  return (
+    m.includes('already exists') ||
+    m.includes('duplicate column') ||
+    m.includes('duplicate column name')
+  );
+}
 
 export async function ensureSqliteSchema(): Promise<void> {
   if (schemaInitPromise) return schemaInitPromise;
@@ -436,14 +524,17 @@ export async function ensureSqliteSchema(): Promise<void> {
   schemaInitPromise = (async () => {
     try {
       const client = getClient();
-      const statements = SCHEMA_SQL.split(';')
-        .map((s) => s.trim())
-        .filter((s) => s.length > 0);
+      const statements = splitSqlStatements(SCHEMA_SQL);
 
       for (const sql of statements) {
         try {
           await client.execute(sql);
-        } catch (_) {}
+        } catch (err: any) {
+          const message = err?.message || String(err);
+          if (!isBenignDdlError(message)) {
+            console.error('[SqliteSchema] Statement failed:', sql.split('\n')[0], '→', message);
+          }
+        }
       }
 
       const migrations = [
@@ -458,12 +549,21 @@ export async function ensureSqliteSchema(): Promise<void> {
         'ALTER TABLE feed_posts ADD COLUMN lat REAL',
         'ALTER TABLE feed_posts ADD COLUMN lng REAL',
         'ALTER TABLE devices ADD COLUMN refresh_token_hash TEXT',
+        // 0007_hardening.sql
+        'ALTER TABLE devices ADD COLUMN expires_at TIMESTAMP NULL',
+        'ALTER TABLE phone_otps ADD COLUMN send_count INTEGER DEFAULT 0',
+        'ALTER TABLE phone_otps ADD COLUMN window_started_at TIMESTAMP NULL',
       ];
 
       for (const m of migrations) {
         try {
           await client.execute(m);
-        } catch (_) {}
+        } catch (err: any) {
+          const message = err?.message || String(err);
+          if (!isBenignDdlError(message)) {
+            console.error('[SqliteSchema] Migration failed:', m, '→', message);
+          }
+        }
       }
 
       console.log('✅ SQLite Schema initialized and migrated successfully.');
@@ -475,11 +575,26 @@ export async function ensureSqliteSchema(): Promise<void> {
   return schemaInitPromise;
 }
 
+/**
+ * Cloudflare D1 credentials. Env-only — there are deliberately no hardcoded
+ * fallbacks here. If these are unset the adapter will refuse to run remote
+ * queries (see executeStatement) instead of silently writing somewhere else.
+ */
 function getD1Credentials() {
-  const accountId = (process.env.CLOUDFLARE_ACCOUNT_ID || '87ada6dd807f3958d8cb396b5211662c').trim();
-  const apiToken = (process.env.CLOUDFLARE_API_TOKEN || Buffer.from('Y2Z1dF9jdzBDQjZpdW53cVBxZEhSVnc0VVdWRmVlR1FZTDBWckJLMDZLbXJzNGI0OWI0Yjk=', 'base64').toString('utf-8')).trim();
-  const dbId = (process.env.D1_DATABASE_ID || process.env.CLOUDFLARE_D1_DATABASE_ID || '6b6f48dc-e3b5-425d-aea9-4ba114a2e7de').trim();
+  const accountId = (process.env.CLOUDFLARE_ACCOUNT_ID || '').trim();
+  const apiToken = (process.env.CLOUDFLARE_API_TOKEN || '').trim();
+  const dbId = (process.env.D1_DATABASE_ID || process.env.CLOUDFLARE_D1_DATABASE_ID || '').trim();
   return { accountId, apiToken, dbId };
+}
+
+/**
+ * Opt-in escape hatch for local development only. When D1 credentials are
+ * configured, a failing D1 query must NOT silently fall through to the local
+ * SQLite file — that produced split-brain data and silent loss on ephemeral
+ * container disks.
+ */
+function isLocalFallbackAllowed(): boolean {
+  return (process.env.DB_ALLOW_LOCAL_FALLBACK || '').trim().toLowerCase() === 'true';
 }
 
 export class SqliteD1Adapter {
@@ -492,9 +607,12 @@ export class SqliteD1Adapter {
 
   prepare(sql: string) {
     const executeStatement = async (params: any[]) => {
-      // 1. Direct Cloudflare D1 REST API execution
       const { accountId, apiToken, dbId } = getD1Credentials();
-      if (apiToken && accountId && dbId) {
+      const d1Configured = Boolean(apiToken && accountId && dbId);
+
+      // 1. Remote Cloudflare D1 (authoritative when configured)
+      if (d1Configured) {
+        let data: any;
         try {
           const url = `https://api.cloudflare.com/client/v4/accounts/${accountId}/d1/database/${dbId}/query`;
           const res = await fetch(url, {
@@ -505,8 +623,18 @@ export class SqliteD1Adapter {
             },
             body: JSON.stringify({ sql, params }),
           });
-          const data = (await res.json()) as any;
-          if (data && data.success && Array.isArray(data.result) && data.result.length > 0) {
+          data = (await res.json()) as any;
+        } catch (networkErr: any) {
+          if (!isLocalFallbackAllowed()) {
+            console.error('[CloudflareD1] Network error for query:', sql.split('\n')[0], networkErr);
+            throw new Error(`D1 request failed: ${networkErr?.message || String(networkErr)}`);
+          }
+          console.warn('[CloudflareD1] Network error; DB_ALLOW_LOCAL_FALLBACK is on, using local SQLite:', networkErr);
+          data = null;
+        }
+
+        if (data) {
+          if (data.success && Array.isArray(data.result) && data.result.length > 0) {
             const firstRes = data.result[0];
             return {
               results: firstRes.results || [],
@@ -515,15 +643,22 @@ export class SqliteD1Adapter {
                 last_row_id: firstRes.meta?.last_row_id ?? 0,
               },
             };
-          } else if (data && !data.success && data.errors?.length > 0) {
-            console.error('[CloudflareD1] API error for query:', sql, data.errors);
           }
-        } catch (d1Err) {
-          console.error('[CloudflareD1] Remote D1 fetch error, using local fallback:', d1Err);
+
+          // D1 answered but the query did not succeed. Surface it — do NOT
+          // silently write to a different database.
+          const errors = Array.isArray(data.errors) ? data.errors : [];
+          const detail = errors.map((e: any) => e?.message || String(e)).join('; ') || 'unknown D1 error';
+          if (!isLocalFallbackAllowed()) {
+            console.error('[CloudflareD1] Query failed:', sql.split('\n')[0], detail);
+            throw new Error(`D1 query failed: ${detail}`);
+          }
+          console.warn('[CloudflareD1] Query failed; DB_ALLOW_LOCAL_FALLBACK is on, using local SQLite:', detail);
         }
       }
 
-      // 2. Local SQLite fallback
+      // 2. Local SQLite — only when D1 is not configured at all (dev), or when
+      //    the operator explicitly opted into the fallback.
       await ensureSqliteSchema();
       const res = await this.client.execute({
         sql,
@@ -576,8 +711,27 @@ export class SqliteD1Adapter {
     return createStatement([]);
   }
 
+  /**
+   * Runs statements sequentially and rejects on the first failure.
+   *
+   * ⚠️ NOT ATOMIC on this adapter. The Cloudflare D1 REST API executes one
+   * statement per HTTP request, so a partial application is possible if a later
+   * statement fails. The native Workers `env.DB.batch()` binding *is* atomic.
+   *
+   * Because of that, any flow whose correctness depends on all-or-nothing
+   * semantics (counter updates paired with a row insert/delete) must not rely
+   * on this method — await the statements individually and verify
+   * `meta.changes` before applying the dependent write.
+   *
+   * It previously used Promise.allSettled, which never rejected and therefore
+   * hid real schema errors behind `success: true` responses.
+   */
   async batch(statements: any[]) {
-    return await Promise.allSettled(statements.map((stmt) => stmt.run()));
+    const results = [];
+    for (const stmt of statements) {
+      results.push(await stmt.run());
+    }
+    return results;
   }
 }
 

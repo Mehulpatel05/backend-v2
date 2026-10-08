@@ -3,6 +3,7 @@ import { Env, Variables } from '../../types';
 import { authMiddleware } from '../../middleware/auth';
 import { getDatabase } from '../../db/db_context';
 import { sendPushNotification } from '../../services/fcm_service';
+import { isBlockedBetween, getBlockRelationship } from '../../utils/blocks';
 
 const friendsApp = new Hono<{ Bindings: Env; Variables: Variables }>();
 
@@ -199,6 +200,12 @@ friendsApp.get('/status/:handle', authMiddleware, async (c) => {
     return c.json({ success: true, relationship: 'none' });
   }
 
+  // Check Block Status
+  const blockRel = await getBlockRelationship(db, myHandle, targetHandle);
+  if (blockRel !== 'none') {
+    return c.json({ success: true, relationship: blockRel });
+  }
+
   // Check Friendship
   const friendship = await db.prepare(
     `SELECT id FROM friendships
@@ -254,15 +261,19 @@ friendsApp.post('/request', authMiddleware, async (c) => {
 
   const db = getDatabase(c);
 
-  // Auto ensure both user records exist
-  try {
-    await db.batch([
-      db.prepare(`INSERT INTO users (id, phone, handle) VALUES (?, ?, ?) ON CONFLICT(handle) DO NOTHING`)
-        .bind(`u_${target}`, `guest_${target}`, target),
-      db.prepare(`INSERT INTO profiles (handle, user_id, display_name) VALUES (?, ?, ?) ON CONFLICT(handle) DO NOTHING`)
-        .bind(target, `u_${target}`, target),
-    ]);
-  } catch (_) {}
+  // Check if users are blocked
+  const isBlocked = await isBlockedBetween(db, myHandle, target);
+  if (isBlocked) {
+    return c.json({ success: false, error: 'Cannot send friend request: user is blocked' }, 403);
+  }
+
+  // Ensure target user exists (no fake guest user accounts)
+  const targetUser = await db.prepare(
+    'SELECT handle FROM users WHERE LOWER(handle) = ? OR LOWER(handle) = ? LIMIT 1'
+  ).bind(target, `@${target}`).first();
+  if (!targetUser) {
+    return c.json({ success: false, error: 'User not found' }, 404);
+  }
 
   // Check if already friends
   const existingFriendship = await db.prepare(
@@ -290,20 +301,23 @@ friendsApp.post('/request', authMiddleware, async (c) => {
   if (reverseReq) {
     const sorted = [target, myHandle].sort();
     const friendshipId = `friend_${sorted[0]}_${sorted[1]}`;
-    await db.batch([
-      db.prepare(
-        `UPDATE friend_requests SET status = 'accepted', updated_at = CURRENT_TIMESTAMP
-         WHERE (LOWER(sender_handle) = ? AND LOWER(receiver_handle) = ?)
-            OR (LOWER(sender_handle) = ? AND LOWER(receiver_handle) = ?)`
-      ).bind(target, myHandle, myHandle, target),
-      db.prepare(
-        `INSERT INTO friendships (id, user1, user2, user1_handle, user2_handle) VALUES (?, ?, ?, ?, ?)
-         ON CONFLICT(id) DO NOTHING`
-      ).bind(friendshipId, sorted[0], sorted[1], sorted[0], sorted[1]),
-      db.prepare(`UPDATE profiles SET friend_count = friend_count + 1 WHERE LOWER(handle) IN (?, ?)`).bind(
+
+    const insertRes = await db.prepare(
+      `INSERT INTO friendships (id, user1_handle, user2_handle) VALUES (?, ?, ?)
+       ON CONFLICT(id) DO NOTHING`
+    ).bind(friendshipId, sorted[0], sorted[1]).run();
+
+    await db.prepare(
+      `UPDATE friend_requests SET status = 'accepted', updated_at = CURRENT_TIMESTAMP
+       WHERE (LOWER(sender_handle) = ? AND LOWER(receiver_handle) = ?)
+          OR (LOWER(sender_handle) = ? AND LOWER(receiver_handle) = ?)`
+    ).bind(target, myHandle, myHandle, target).run();
+
+    if (insertRes.meta?.changes === 1) {
+      await db.prepare(`UPDATE profiles SET friend_count = friend_count + 1 WHERE LOWER(handle) IN (?, ?)`).bind(
         target, myHandle
-      ),
-    ]);
+      ).run();
+    }
 
     // Notify target that you accepted their pending request
     try {
@@ -315,7 +329,9 @@ friendsApp.post('/request', authMiddleware, async (c) => {
           .bind(myHandle, `@${myHandle}`)
           .first()) as any;
         accepterDisplayName = (accepterProfile?.display_name || '').trim();
-      } catch (_) {}
+      } catch (profileErr) {
+        console.warn('[Auto-Accept] Profile lookup warning:', profileErr);
+      }
 
       const accepterDisplay = accepterDisplayName ? `${accepterDisplayName} (@${myHandle})` : `@${myHandle}`;
       const acceptBody = `${accepterDisplay} accepted your friend request! Tap to start chatting.`;
@@ -328,7 +344,7 @@ friendsApp.post('/request', authMiddleware, async (c) => {
       };
 
       await db.prepare(
-        `INSERT INTO notifications (id, target_handle, sender_handle, type, title, body, data_json, is_read, created_at)
+        `INSERT INTO notifications (id, target_handle, sender_handle, type, title, body, payload_json, is_read, created_at)
          VALUES (?, ?, ?, 'friend_accept', 'Friend Request Accepted', ?, ?, 0, CURRENT_TIMESTAMP)`
       ).bind(
         notifId,
@@ -346,7 +362,9 @@ friendsApp.post('/request', authMiddleware, async (c) => {
         channelId: 'nearhood_channel',
         db,
       }).catch((pushErr) => console.error('[Auto-Accept FCM] Push error:', pushErr));
-    } catch (_) {}
+    } catch (notifErr) {
+      console.error('[Auto-Accept Notification] Error:', notifErr);
+    }
 
     return c.json({
       success: true,
@@ -394,7 +412,7 @@ friendsApp.post('/request', authMiddleware, async (c) => {
     };
 
     await db.prepare(
-      `INSERT INTO notifications (id, target_handle, sender_handle, type, title, body, data_json, is_read, created_at)
+      `INSERT INTO notifications (id, target_handle, sender_handle, type, title, body, payload_json, is_read, created_at)
        VALUES (?, ?, ?, 'friend_request', 'New Friend Request', ?, ?, 0, CURRENT_TIMESTAMP)`
     ).bind(
       notifId,
@@ -413,7 +431,9 @@ friendsApp.post('/request', authMiddleware, async (c) => {
       channelId: 'nearhood_channel',
       db,
     }).catch((pushErr) => console.error('[Friend Request FCM] Push error:', pushErr));
-  } catch (_) {}
+  } catch (err) {
+    console.error('[Friend Request Notification] Error:', err);
+  }
 
   return c.json({
     success: true,
@@ -445,37 +465,43 @@ friendsApp.post('/accept', authMiddleware, async (c) => {
 
   if (!req && body.requestId) {
     req = (await db.prepare(
-      `SELECT * FROM friend_requests WHERE id = ? AND LOWER(receiver_handle) = ? LIMIT 1`
+      `SELECT * FROM friend_requests WHERE id = ? AND LOWER(receiver_handle) = ? AND status = 'pending' LIMIT 1`
     )
       .bind(body.requestId, myHandle)
       .first()) as any;
   }
 
-  const otherPerson = req ? (req.sender_handle || '').replace(/^@+/, '').trim().toLowerCase() : sender;
+  if (!req) {
+    return c.json({ success: false, error: 'Pending friend request not found' }, 404);
+  }
+
+  const otherPerson = (req.sender_handle || '').replace(/^@+/, '').trim().toLowerCase();
   if (!otherPerson) {
-    return c.json({ success: false, error: 'Friend request not found' }, 404);
+    return c.json({ success: false, error: 'Invalid friend request sender' }, 400);
   }
 
   const sorted = [otherPerson, myHandle].sort();
   const friendshipId = `friend_${sorted[0]}_${sorted[1]}`;
 
-  await db.batch([
-    db.prepare(
-      `UPDATE friend_requests SET status = 'accepted', updated_at = CURRENT_TIMESTAMP
-       WHERE (LOWER(sender_handle) = ? AND LOWER(receiver_handle) = ?)
-          OR (LOWER(sender_handle) = ? AND LOWER(receiver_handle) = ?)`
-    ).bind(
-      otherPerson, myHandle,
-      myHandle, otherPerson
-    ),
-    db.prepare(
-      `INSERT INTO friendships (id, user1, user2, user1_handle, user2_handle) VALUES (?, ?, ?, ?, ?)
-       ON CONFLICT(id) DO NOTHING`
-    ).bind(friendshipId, sorted[0], sorted[1], sorted[0], sorted[1]),
-    db.prepare(`UPDATE profiles SET friend_count = friend_count + 1 WHERE LOWER(handle) IN (?, ?)`).bind(
+  const insertRes = await db.prepare(
+    `INSERT INTO friendships (id, user1_handle, user2_handle) VALUES (?, ?, ?)
+     ON CONFLICT(id) DO NOTHING`
+  ).bind(friendshipId, sorted[0], sorted[1]).run();
+
+  await db.prepare(
+    `UPDATE friend_requests SET status = 'accepted', updated_at = CURRENT_TIMESTAMP
+     WHERE (LOWER(sender_handle) = ? AND LOWER(receiver_handle) = ?)
+        OR (LOWER(sender_handle) = ? AND LOWER(receiver_handle) = ?)`
+  ).bind(
+    otherPerson, myHandle,
+    myHandle, otherPerson
+  ).run();
+
+  if (insertRes.meta?.changes === 1) {
+    await db.prepare(`UPDATE profiles SET friend_count = friend_count + 1 WHERE LOWER(handle) IN (?, ?)`).bind(
       otherPerson, myHandle
-    ),
-  ]);
+    ).run();
+  }
 
   // Create notification for other person
   try {
@@ -500,7 +526,7 @@ friendsApp.post('/accept', authMiddleware, async (c) => {
     };
 
     await db.prepare(
-      `INSERT INTO notifications (id, target_handle, sender_handle, type, title, body, data_json, is_read, created_at)
+      `INSERT INTO notifications (id, target_handle, sender_handle, type, title, body, payload_json, is_read, created_at)
        VALUES (?, ?, ?, 'friend_accept', 'Friend Request Accepted', ?, ?, 0, CURRENT_TIMESTAMP)`
     ).bind(
       notifId,
@@ -519,7 +545,9 @@ friendsApp.post('/accept', authMiddleware, async (c) => {
       channelId: 'nearhood_channel',
       db,
     }).catch((pushErr) => console.error('[Friend Accept FCM] Push error:', pushErr));
-  } catch (_) {}
+  } catch (notifErr) {
+    console.error('[Friend Accept Notification] Error:', notifErr);
+  }
 
   return c.json({
     success: true,
@@ -536,29 +564,31 @@ friendsApp.post('/request/:id/accept', authMiddleware, async (c) => {
   const db = getDatabase(c);
 
   const req = (await db.prepare(
-    'SELECT * FROM friend_requests WHERE id = ? AND LOWER(receiver_handle) = ? LIMIT 1'
+    'SELECT * FROM friend_requests WHERE id = ? AND LOWER(receiver_handle) = ? AND status = \'pending\' LIMIT 1'
   )
     .bind(requestId, myHandle)
     .first()) as any;
 
   if (!req) {
-    return c.json({ success: false, error: 'Friend request not found' }, 404);
+    return c.json({ success: false, error: 'Pending friend request not found' }, 404);
   }
 
   const sender = (req.sender_handle || '').replace(/^@+/, '').trim().toLowerCase();
   const sorted = [sender, myHandle].sort();
   const friendshipId = `friend_${sorted[0]}_${sorted[1]}`;
 
-  await db.batch([
-    db.prepare('UPDATE friend_requests SET status = "accepted", updated_at = CURRENT_TIMESTAMP WHERE id = ?').bind(requestId),
-    db.prepare(
-      `INSERT INTO friendships (id, user1, user2, user1_handle, user2_handle) VALUES (?, ?, ?, ?, ?)
-       ON CONFLICT(id) DO NOTHING`
-    ).bind(friendshipId, sorted[0], sorted[1], sorted[0], sorted[1]),
-    db.prepare('UPDATE profiles SET friend_count = friend_count + 1 WHERE LOWER(handle) IN (?, ?)').bind(
+  await db.prepare('UPDATE friend_requests SET status = \'accepted\', updated_at = CURRENT_TIMESTAMP WHERE id = ?').bind(requestId).run();
+
+  const insertRes = await db.prepare(
+    `INSERT INTO friendships (id, user1_handle, user2_handle) VALUES (?, ?, ?)
+     ON CONFLICT(id) DO NOTHING`
+  ).bind(friendshipId, sorted[0], sorted[1]).run();
+
+  if (insertRes.meta?.changes === 1) {
+    await db.prepare('UPDATE profiles SET friend_count = friend_count + 1 WHERE LOWER(handle) IN (?, ?)').bind(
       sender, myHandle
-    ),
-  ]);
+    ).run();
+  }
 
   // Create notification for sender
   try {
@@ -582,7 +612,7 @@ friendsApp.post('/request/:id/accept', authMiddleware, async (c) => {
       senderDisplayName: accepterDisplayName || myHandle,
     };
     await db.prepare(
-      `INSERT INTO notifications (id, target_handle, sender_handle, type, title, body, data_json, is_read, created_at)
+      `INSERT INTO notifications (id, target_handle, sender_handle, type, title, body, payload_json, is_read, created_at)
        VALUES (?, ?, ?, 'friend_accept', 'Friend Request Accepted', ?, ?, 0, CURRENT_TIMESTAMP)`
     ).bind(
       notifId,
@@ -777,15 +807,81 @@ friendsApp.get('/requests', authMiddleware, async (c) => {
 
 // 9. Block / Unblock / Blocked list
 friendsApp.get('/blocked', authMiddleware, async (c) => {
-  return c.json({ success: true, blocked: [] });
+  const user = c.get('user');
+  const myHandle = user.userHandle.replace(/^@+/, '').trim().toLowerCase();
+  const db = getDatabase(c);
+
+  try {
+    const { results } = await db.prepare(
+      `SELECT id, blocker_handle, blocked_handle, created_at FROM user_blocks
+       WHERE LOWER(blocker_handle) = ?
+       ORDER BY created_at DESC`
+    ).bind(myHandle).all();
+
+    const blocked = (results || []).map((r: any) => ({
+      id: r.id,
+      blockerHandle: (r.blocker_handle || '').replace(/^@+/, '').trim(),
+      blockedHandle: (r.blocked_handle || '').replace(/^@+/, '').trim(),
+      createdAt: r.created_at,
+    }));
+
+    return c.json({ success: true, blocked });
+  } catch (err: any) {
+    console.error('[Friends/blocked] Error:', err);
+    return c.json({ success: false, error: err?.message || 'Failed to load blocked users' }, 500);
+  }
 });
 
 friendsApp.post('/block', authMiddleware, async (c) => {
-  return c.json({ success: true, message: 'User blocked' });
+  const user = c.get('user');
+  const myHandle = user.userHandle.replace(/^@+/, '').trim().toLowerCase();
+  const body = await c.req.json().catch(() => ({}));
+  const rawTarget = body.blockedHandle || body.blocked_handle || body.handle || '';
+  const target = rawTarget.replace(/^@+/, '').trim().toLowerCase();
+
+  if (!target || target === myHandle) {
+    return c.json({ success: false, error: 'Valid blockedHandle is required' }, 400);
+  }
+
+  const db = getDatabase(c);
+  const blockId = `block_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`;
+
+  try {
+    await db.prepare(
+      `INSERT INTO user_blocks (id, blocker_handle, blocked_handle, created_at)
+       VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+       ON CONFLICT(blocker_handle, blocked_handle) DO NOTHING`
+    ).bind(blockId, myHandle, target).run();
+
+    return c.json({ success: true, message: 'User blocked' });
+  } catch (err: any) {
+    console.error('[Friends/block] Error:', err);
+    return c.json({ success: false, error: err?.message || 'Failed to block user' }, 500);
+  }
 });
 
 friendsApp.post('/unblock', authMiddleware, async (c) => {
-  return c.json({ success: true, message: 'User unblocked' });
+  const user = c.get('user');
+  const myHandle = user.userHandle.replace(/^@+/, '').trim().toLowerCase();
+  const body = await c.req.json().catch(() => ({}));
+  const rawTarget = body.blockedHandle || body.blocked_handle || body.handle || '';
+  const target = rawTarget.replace(/^@+/, '').trim().toLowerCase();
+
+  if (!target) {
+    return c.json({ success: false, error: 'Valid blockedHandle is required' }, 400);
+  }
+
+  const db = getDatabase(c);
+  try {
+    await db.prepare(
+      `DELETE FROM user_blocks WHERE LOWER(blocker_handle) = ? AND LOWER(blocked_handle) = ?`
+    ).bind(myHandle, target).run();
+
+    return c.json({ success: true, message: 'User unblocked' });
+  } catch (err: any) {
+    console.error('[Friends/unblock] Error:', err);
+    return c.json({ success: false, error: err?.message || 'Failed to unblock user' }, 500);
+  }
 });
 
 export { friendsApp };

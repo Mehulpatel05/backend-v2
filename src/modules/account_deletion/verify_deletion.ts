@@ -6,6 +6,10 @@ export interface DeletionAuditReport {
     devicesLeft: number;
     chatsLeft: number;
     postsLeft: number;
+    listingsLeft: number;
+    shopsLeft: number;
+    notificationsLeft: number;
+    friendshipsLeft: number;
   };
 }
 
@@ -21,6 +25,10 @@ export async function verifyUserDeletion(
     devicesLeft: 0,
     chatsLeft: 0,
     postsLeft: 0,
+    listingsLeft: 0,
+    shopsLeft: 0,
+    notificationsLeft: 0,
+    friendshipsLeft: 0,
   };
 
   try {
@@ -67,12 +75,48 @@ export async function verifyUserDeletion(
     auditCounts.postsLeft = postsRow?.cnt ?? 0;
   } catch (_) {}
 
+  try {
+    const listingsRow = (await db
+      .prepare('SELECT COUNT(*) as cnt FROM bazar_listings WHERE LOWER(seller_handle) = ? OR LOWER(seller_handle) = ?')
+      .bind(cleanHandle, `@${cleanHandle}`)
+      .first()) as any;
+    auditCounts.listingsLeft = listingsRow?.cnt ?? 0;
+  } catch (_) {}
+
+  try {
+    const shopsRow = (await db
+      .prepare('SELECT COUNT(*) as cnt FROM bazar_shops WHERE LOWER(owner_handle) = ? OR LOWER(owner_handle) = ?')
+      .bind(cleanHandle, `@${cleanHandle}`)
+      .first()) as any;
+    auditCounts.shopsLeft = shopsRow?.cnt ?? 0;
+  } catch (_) {}
+
+  try {
+    const notifRow = (await db
+      .prepare('SELECT COUNT(*) as cnt FROM notifications WHERE LOWER(target_handle) = ? OR LOWER(target_handle) = ?')
+      .bind(cleanHandle, `@${cleanHandle}`)
+      .first()) as any;
+    auditCounts.notificationsLeft = notifRow?.cnt ?? 0;
+  } catch (_) {}
+
+  try {
+    const friendRow = (await db
+      .prepare('SELECT COUNT(*) as cnt FROM friendships WHERE LOWER(user1_handle) = ? OR LOWER(user2_handle) = ? OR LOWER(user1_handle) = ? OR LOWER(user2_handle) = ?')
+      .bind(cleanHandle, cleanHandle, `@${cleanHandle}`, `@${cleanHandle}`)
+      .first()) as any;
+    auditCounts.friendshipsLeft = friendRow?.cnt ?? 0;
+  } catch (_) {}
+
   const verifiedZeroRecords =
     auditCounts.usersLeft === 0 &&
     auditCounts.profilesLeft === 0 &&
     auditCounts.devicesLeft === 0 &&
     auditCounts.chatsLeft === 0 &&
-    auditCounts.postsLeft === 0;
+    auditCounts.postsLeft === 0 &&
+    auditCounts.listingsLeft === 0 &&
+    auditCounts.shopsLeft === 0 &&
+    auditCounts.notificationsLeft === 0 &&
+    auditCounts.friendshipsLeft === 0;
 
   return {
     verifiedZeroRecords,

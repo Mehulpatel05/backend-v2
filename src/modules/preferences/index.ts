@@ -81,14 +81,25 @@ preferencesApp.get('/:handle', async (c) => {
 // 2. Save Preferences
 preferencesApp.post('/', authMiddleware, async (c) => {
   const user = c.get('user');
+  const myHandle = (user.userHandle || '').replace(/^@+/, '').trim().toLowerCase();
   const body = await c.req.json().catch(() => ({}));
-  const callPrivacy = body.callPrivacy || body.call_privacy || 'everyone';
-  const pinnedChats = body.pinnedChats || body.pinned_chats || [];
-  const mutedChats = body.mutedChats || body.muted_chats || [];
-  const theme = body.theme || 'dark';
   const db = getDatabase(c);
 
   try {
+    const existing = (await db.prepare(
+      'SELECT * FROM user_preferences WHERE LOWER(user_handle) = ? OR LOWER(user_handle) = ? LIMIT 1'
+    ).bind(myHandle, `@${myHandle}`).first()) as any;
+
+    let existingPinned: any[] = [];
+    let existingMuted: any[] = [];
+    try { existingPinned = JSON.parse(existing?.pinned_chats_json || '[]'); } catch (_) {}
+    try { existingMuted = JSON.parse(existing?.muted_chats_json || '[]'); } catch (_) {}
+
+    const callPrivacy = body.callPrivacy ?? body.call_privacy ?? existing?.call_privacy ?? 'everyone';
+    const pinnedChats = body.pinnedChats ?? body.pinned_chats ?? existingPinned;
+    const mutedChats = body.mutedChats ?? body.muted_chats ?? existingMuted;
+    const theme = body.theme ?? existing?.theme ?? 'dark';
+
     await db.prepare(
       `INSERT INTO user_preferences (user_handle, call_privacy, pinned_chats_json, muted_chats_json, theme, updated_at)
        VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
@@ -99,7 +110,7 @@ preferencesApp.post('/', authMiddleware, async (c) => {
          theme = excluded.theme,
          updated_at = CURRENT_TIMESTAMP`
     )
-      .bind(user.userHandle, callPrivacy, JSON.stringify(pinnedChats), JSON.stringify(mutedChats), theme)
+      .bind(myHandle, callPrivacy, JSON.stringify(pinnedChats), JSON.stringify(mutedChats), theme)
       .run();
 
     return c.json({ success: true, message: 'Preferences saved successfully' });
@@ -111,6 +122,7 @@ preferencesApp.post('/', authMiddleware, async (c) => {
 // 3. Pin / Unpin Chat
 preferencesApp.post('/pin', authMiddleware, async (c) => {
   const user = c.get('user');
+  const myHandle = (user.userHandle || '').replace(/^@+/, '').trim().toLowerCase();
   const body = await c.req.json().catch(() => ({}));
   const chatId = body.chatId || body.chat_id;
   const isPinned = body.isPinned ?? body.is_pinned ?? true;
@@ -119,8 +131,8 @@ preferencesApp.post('/pin', authMiddleware, async (c) => {
   if (!chatId) return c.json({ success: false, error: 'chatId required' }, 400);
 
   try {
-    const row = (await db.prepare('SELECT pinned_chats_json FROM user_preferences WHERE user_handle = ? LIMIT 1')
-      .bind(user.userHandle)
+    const row = (await db.prepare('SELECT pinned_chats_json FROM user_preferences WHERE LOWER(user_handle) = ? OR LOWER(user_handle) = ? LIMIT 1')
+      .bind(myHandle, `@${myHandle}`)
       .first()) as any;
 
     let pinned: string[] = [];
@@ -139,7 +151,7 @@ preferencesApp.post('/pin', authMiddleware, async (c) => {
          pinned_chats_json = excluded.pinned_chats_json,
          updated_at = CURRENT_TIMESTAMP`
     )
-      .bind(user.userHandle, JSON.stringify(pinned))
+      .bind(myHandle, JSON.stringify(pinned))
       .run();
 
     return c.json({ success: true, isPinned, pinnedChats: pinned });
@@ -151,6 +163,7 @@ preferencesApp.post('/pin', authMiddleware, async (c) => {
 // 4. Mute / Unmute Chat
 preferencesApp.post('/mute', authMiddleware, async (c) => {
   const user = c.get('user');
+  const myHandle = (user.userHandle || '').replace(/^@+/, '').trim().toLowerCase();
   const body = await c.req.json().catch(() => ({}));
   const chatId = body.chatId || body.chat_id;
   const isMuted = body.isMuted ?? body.is_muted ?? true;
@@ -159,8 +172,8 @@ preferencesApp.post('/mute', authMiddleware, async (c) => {
   if (!chatId) return c.json({ success: false, error: 'chatId required' }, 400);
 
   try {
-    const row = (await db.prepare('SELECT muted_chats_json FROM user_preferences WHERE user_handle = ? LIMIT 1')
-      .bind(user.userHandle)
+    const row = (await db.prepare('SELECT muted_chats_json FROM user_preferences WHERE LOWER(user_handle) = ? OR LOWER(user_handle) = ? LIMIT 1')
+      .bind(myHandle, `@${myHandle}`)
       .first()) as any;
 
     let muted: string[] = [];
@@ -179,7 +192,7 @@ preferencesApp.post('/mute', authMiddleware, async (c) => {
          muted_chats_json = excluded.muted_chats_json,
          updated_at = CURRENT_TIMESTAMP`
     )
-      .bind(user.userHandle, JSON.stringify(muted))
+      .bind(myHandle, JSON.stringify(muted))
       .run();
 
     return c.json({ success: true, isMuted, mutedChats: muted });

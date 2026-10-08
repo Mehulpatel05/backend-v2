@@ -6,6 +6,8 @@
  * - Route "q": Quick custom text message ("Your Nearhood verification code is...")
  */
 
+import { AppConfig } from '../utils/config';
+
 export interface Fast2SmsSendResult {
   success: boolean;
   requestId?: string;
@@ -52,9 +54,12 @@ export class Fast2SmsService {
       return { success: false, error: 'Valid 10-digit phone number is required' };
     }
 
-    // Test numbers bypass (App review & QA)
+    // Review/QA numbers: only honoured when explicitly enabled outside
+    // production, matching the gate in modules/auth (ALLOW_TEST_OTP).
     const testPhones = ['0000000000', '9999999999'];
-    if (testPhones.includes(tenDigits)) {
+    const testOtpEnabled =
+      !AppConfig.isProduction && (process.env.ALLOW_TEST_OTP || '').trim().toLowerCase() === 'true';
+    if (testOtpEnabled && testPhones.includes(tenDigits)) {
       const testReqId = `test_fast2sms_${Date.now()}`;
       return { success: true, requestId: testReqId };
     }

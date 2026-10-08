@@ -151,14 +151,14 @@ foundingApp.get('/me', authMiddleware, async (c) => {
         SELECT COUNT(*) as cnt FROM feed_posts 
         WHERE (LOWER(author_handle) = ? OR LOWER(author_handle) = ?) 
           AND (area_id = ? OR area_name = ?) 
-          AND (is_deleted = 0 OR is_deleted IS NULL)
+          AND status != 'deleted'
       `).bind(userHandle, `@${userHandle}`, areaId, getAreaName(areaId)).first()) as any;
       postCount = postRow?.cnt || 0;
     } else {
       const postRow = (await db.prepare(`
         SELECT COUNT(*) as cnt FROM feed_posts 
         WHERE (LOWER(author_handle) = ? OR LOWER(author_handle) = ?) 
-          AND (is_deleted = 0 OR is_deleted IS NULL)
+          AND status != 'deleted'
       `).bind(userHandle, `@${userHandle}`).first()) as any;
       postCount = postRow?.cnt || 0;
     }
@@ -199,7 +199,7 @@ foundingApp.post('/request', authMiddleware, async (c) => {
       SELECT COUNT(*) as cnt FROM feed_posts 
       WHERE (LOWER(author_handle) = ? OR LOWER(author_handle) = ?) 
         AND (area_id = ? OR area_name = ?) 
-        AND (is_deleted = 0 OR is_deleted IS NULL)
+        AND status != 'deleted'
     `).bind(userHandle, `@${userHandle}`, areaId, getAreaName(areaId)).first()) as any;
 
     if (!postRow || postRow.cnt < 1) {
@@ -476,9 +476,9 @@ adminFoundingApp.post('/requests/:id/approve', async (c) => {
     const areaId = reqRow.area_id;
     const targetUser = reqRow.user_id;
 
-    // 1. Check spots count
+    // 1. Check spots count and get next sequence number
     const approvedRow = (await db.prepare(
-      'SELECT COUNT(*) as cnt FROM area_founders WHERE area_id = ?'
+      'SELECT COUNT(*) as cnt, COALESCE(MAX(seq), 0) as max_seq FROM area_founders WHERE area_id = ?'
     ).bind(areaId).first()) as any;
 
     const currentApproved = approvedRow?.cnt || 0;
@@ -486,7 +486,7 @@ adminFoundingApp.post('/requests/:id/approve', async (c) => {
       return c.json({ success: false, error: 'All 100 spots for this area are full.' }, 400);
     }
 
-    const nextSeq = currentApproved + 1;
+    const nextSeq = (approvedRow?.max_seq || 0) + 1;
     const areaName = getAreaName(areaId);
 
     // 2. Insert into area_founders
@@ -597,16 +597,32 @@ adminFoundingApp.post('/founders/:user_id/remove', async (c) => {
   const areaId = (body.area_id || body.areaId || '').trim();
   const db = getDatabase(c);
 
-  try {
-    await db.prepare(
-      'DELETE FROM area_founders WHERE LOWER(user_id) = ? AND (area_id = ? OR ? = "")'
-    ).bind(targetUser, areaId, areaId).run();
+  if (!areaId && body.all_areas !== true) {
+    return c.json({ success: false, error: 'area_id is required' }, 400);
+  }
 
-    await db.prepare(`
-      UPDATE founding_requests 
-      SET status = 'rejected', reason = 'Badge revoked by administrator' 
-      WHERE LOWER(user_id) = ? AND (area_id = ? OR ? = "")
-    `).bind(targetUser, areaId, areaId).run();
+  try {
+    if (areaId) {
+      await db.prepare(
+        'DELETE FROM area_founders WHERE LOWER(user_id) = ? AND area_id = ?'
+      ).bind(targetUser, areaId).run();
+
+      await db.prepare(`
+        UPDATE founding_requests 
+        SET status = 'rejected', reason = 'Badge revoked by administrator', reviewed_at = CURRENT_TIMESTAMP 
+        WHERE LOWER(user_id) = ? AND area_id = ?
+      `).bind(targetUser, areaId).run();
+    } else {
+      await db.prepare(
+        'DELETE FROM area_founders WHERE LOWER(user_id) = ?'
+      ).bind(targetUser).run();
+
+      await db.prepare(`
+        UPDATE founding_requests 
+        SET status = 'rejected', reason = 'Badge revoked by administrator', reviewed_at = CURRENT_TIMESTAMP 
+        WHERE LOWER(user_id) = ?
+      `).bind(targetUser).run();
+    }
 
     await db.prepare(
       "DELETE FROM user_badges WHERE LOWER(user_handle) = ? AND badge_key = 'founding_neighbour'"
@@ -617,6 +633,6 @@ adminFoundingApp.post('/founders/:user_id/remove', async (c) => {
       message: `Founding Neighbour badge removed for @${targetUser}`,
     });
   } catch (e: any) {
-    return c.json({ success: false, error: e.message }, 500);
+    return c.json({ success: false, error: e?.message || 'Removal failed' }, 500);
   }
 });

@@ -1,37 +1,73 @@
 import { Hono } from 'hono';
 import { S3Client, ListObjectsV2Command, DeleteObjectsCommand } from '@aws-sdk/client-s3';
 import { Env, Variables } from '../../types';
-import { adminAuthMiddleware, ADMIN_SECRET_KEY } from '../../middleware/admin_auth';
+import { adminAuthMiddleware, getAdminSecretKey, ADMIN_SESSION_TTL_HOURS } from '../../middleware/admin_auth';
+import { hashToken, timingSafeEqual } from '../../middleware/auth';
 import { getDatabase } from '../../db/db_context';
 import { AppConfig } from '../../utils/config';
+import { orchestrateAccountDeletion } from '../account_deletion';
 
 const adminApp = new Hono<{ Bindings: Env; Variables: Variables }>();
+
+function generateSecureToken(): string {
+  const buffer = new Uint8Array(32);
+  crypto.getRandomValues(buffer);
+  return Array.from(buffer)
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+}
 
 adminApp.post('/login', async (c) => {
   const body = await c.req.json().catch(() => ({}));
   const username = (body.username || '').trim();
   const password = (body.password || '').trim();
   const key = (body.adminKey || body.key || '').trim();
+  const secret = getAdminSecretKey();
 
-  const isPasswordMatch = (username === 'admin' || username === 'superadmin') && (password === 'Vadodara@2026' || password === 'admin123');
-  const isKeyMatch = key === ADMIN_SECRET_KEY || password === ADMIN_SECRET_KEY;
+  const configuredAdminUsername = (process.env.ADMIN_USERNAME || 'admin').trim();
+  const configuredPasswordHash = (process.env.ADMIN_PASSWORD_HASH || '').trim();
 
-  if (isPasswordMatch || isKeyMatch) {
-    return c.json({
-      success: true,
-      token: 'nh_super_admin_session_token',
-      adminKey: ADMIN_SECRET_KEY,
-      admin: {
-        id: 'admin_vadodara_01',
-        name: 'Vadodara Admin Desk',
-        handle: 'super_admin',
-        role: 'super_admin',
-        city: 'Vadodara',
-      },
-    });
+  let authenticated = false;
+
+  // Master secret key authentication
+  if (secret && ((key && timingSafeEqual(key, secret)) || (password && timingSafeEqual(password, secret)))) {
+    authenticated = true;
+  } else if (configuredPasswordHash && username && timingSafeEqual(username.toLowerCase(), configuredAdminUsername.toLowerCase())) {
+    const inputHash = await hashToken(password);
+    if (timingSafeEqual(inputHash, configuredPasswordHash)) {
+      authenticated = true;
+    }
   }
 
-  return c.json({ success: false, error: 'Invalid admin username or password' }, 401);
+  if (!authenticated) {
+    return c.json({ success: false, error: 'Invalid admin credentials' }, 401);
+  }
+
+  const sessionToken = generateSecureToken();
+  const tokenHash = await hashToken(sessionToken);
+  const db = getDatabase(c);
+
+  try {
+    await db.prepare(
+      `INSERT INTO admin_sessions (token_hash, admin_username, created_at, expires_at)
+       VALUES (?, ?, CURRENT_TIMESTAMP, datetime('now', '+${ADMIN_SESSION_TTL_HOURS} hours'))`
+    ).bind(tokenHash, username || 'admin_vadodara').run();
+  } catch (err) {
+    console.error('[AdminLogin] Failed to create admin session:', err);
+    return c.json({ success: false, error: 'Could not create admin session' }, 500);
+  }
+
+  return c.json({
+    success: true,
+    token: sessionToken,
+    admin: {
+      id: 'admin_vadodara_01',
+      name: 'Vadodara Admin Desk',
+      handle: username || 'super_admin',
+      role: 'super_admin',
+      city: 'Vadodara',
+    },
+  });
 });
 
 adminApp.use('/*', adminAuthMiddleware);
@@ -346,21 +382,30 @@ adminApp.post('/users/:handle/action', async (c) => {
 
   try {
     if (action === 'ban') {
-      await db.prepare('UPDATE devices SET revoked_at = CURRENT_TIMESTAMP WHERE user_handle = ? OR user_handle = ?')
+      await db.prepare('UPDATE users SET is_banned = 1 WHERE LOWER(handle) = LOWER(?) OR LOWER(handle) = LOWER(?)')
+        .bind(handle, `@${handle}`)
+        .run();
+      await db.prepare('UPDATE devices SET revoked_at = CURRENT_TIMESTAMP WHERE LOWER(user_handle) = LOWER(?) OR LOWER(user_handle) = LOWER(?)')
         .bind(handle, `@${handle}`)
         .run();
       return c.json({ success: true, message: `User @${handle} banned and all device sessions revoked` });
     }
 
     if (action === 'unban') {
-      await db.prepare('UPDATE devices SET revoked_at = NULL WHERE user_handle = ? OR user_handle = ?')
+      await db.prepare('UPDATE users SET is_banned = 0 WHERE LOWER(handle) = LOWER(?) OR LOWER(handle) = LOWER(?)')
+        .bind(handle, `@${handle}`)
+        .run();
+      await db.prepare('UPDATE devices SET revoked_at = NULL WHERE LOWER(user_handle) = LOWER(?) OR LOWER(user_handle) = LOWER(?)')
         .bind(handle, `@${handle}`)
         .run();
       return c.json({ success: true, message: `User @${handle} unbanned` });
     }
 
     if (action === 'verify') {
-      await db.prepare("UPDATE profiles SET bio = bio || ' [Verified]' WHERE handle = ? OR handle = ?")
+      await db.prepare('UPDATE profiles SET is_verified = 1, updated_at = CURRENT_TIMESTAMP WHERE handle = ? OR handle = ?')
+        .bind(handle, `@${handle}`)
+        .run();
+      await db.prepare('UPDATE users SET is_verified = 1 WHERE handle = ? OR handle = ?')
         .bind(handle, `@${handle}`)
         .run();
       return c.json({ success: true, message: `User @${handle} marked with Verified Badge` });
@@ -368,7 +413,7 @@ adminApp.post('/users/:handle/action', async (c) => {
 
     return c.json({ success: false, error: 'Invalid user action' }, 400);
   } catch (e: any) {
-    return c.json({ success: false, error: e.message }, 500);
+    return c.json({ success: false, error: e?.message || 'Action failed' }, 500);
   }
 });
 
@@ -376,84 +421,25 @@ adminApp.delete('/users/:handle', async (c) => {
   const rawHandle = c.req.param('handle');
   const handle = rawHandle.replace(/^@+/, '').trim().toLowerCase();
   const db = getDatabase(c);
-  const cascade = c.req.query('cascade') !== 'false';
 
   try {
-    const handleVariants = [handle, `@${handle}`];
-
-    // 1. Delete R2 objects under users/@{handle}/ and users/{handle}/
-    try {
-      const bucket = AppConfig.r2Bucket || 'nearhood';
-      if (AppConfig.r2Endpoint && AppConfig.r2AccessKeyId && AppConfig.r2SecretAccessKey) {
-        const s3Client = new S3Client({
-          region: 'auto',
-          endpoint: AppConfig.r2Endpoint,
-          credentials: {
-            accessKeyId: AppConfig.r2AccessKeyId,
-            secretAccessKey: AppConfig.r2SecretAccessKey,
-          },
-        });
-
-        const prefixes = [`users/@${handle}/`, `users/${handle}/`];
-        for (const prefix of prefixes) {
-          let continuationToken: string | undefined = undefined;
-          do {
-            const listRes: any = await s3Client.send(
-              new ListObjectsV2Command({
-                Bucket: bucket,
-                Prefix: prefix,
-                ContinuationToken: continuationToken,
-              })
-            );
-
-            if (listRes.Contents && listRes.Contents.length > 0) {
-              const deleteKeys = listRes.Contents.map((obj: any) => ({ Key: obj.Key! }));
-              await s3Client.send(
-                new DeleteObjectsCommand({
-                  Bucket: bucket,
-                  Delete: { Objects: deleteKeys },
-                })
-              );
-            }
-            continuationToken = listRes.NextContinuationToken;
-          } while (continuationToken);
-        }
-      }
-    } catch (r2Err) {
-      console.warn('[AdminDeleteUser] R2 cleanup warning:', r2Err);
+    const result = await orchestrateAccountDeletion(db, handle, 'admin');
+    if (!result.success) {
+      return c.json({
+        success: false,
+        error: result.message || 'Deletion failed',
+        details: result,
+      }, 500);
     }
-
-    // 2. Cascade Cloudflare D1 Deletion
-    if (cascade) {
-      await db.prepare('DELETE FROM bazar_listings WHERE seller_handle = ? OR seller_handle = ?').bind(...handleVariants).run();
-      await db.prepare('DELETE FROM bazar_shops WHERE owner_handle = ? OR owner_handle = ?').bind(...handleVariants).run();
-      await db.prepare('DELETE FROM bazar_saved WHERE user_handle = ? OR user_handle = ?').bind(...handleVariants).run();
-      await db.prepare('DELETE FROM feed_posts WHERE author_handle = ? OR author_handle = ?').bind(...handleVariants).run();
-      await db.prepare('DELETE FROM feed_comments WHERE author_handle = ? OR author_handle = ?').bind(...handleVariants).run();
-      await db.prepare('DELETE FROM feed_likes WHERE user_handle = ? OR user_handle = ?').bind(...handleVariants).run();
-      await db.prepare('DELETE FROM post_votes WHERE user_handle = ? OR user_handle = ?').bind(...handleVariants).run();
-      await db.prepare('DELETE FROM friend_requests WHERE sender_handle = ? OR receiver_handle = ?').bind(handle, handle).run();
-      await db.prepare('DELETE FROM friendships WHERE user1_handle = ? OR user2_handle = ?').bind(handle, handle).run();
-      await db.prepare('DELETE FROM notifications WHERE target_handle = ? OR sender_handle = ?').bind(handle, handle).run();
-      await db.prepare('DELETE FROM community_members WHERE user_handle = ? OR user_handle = ?').bind(...handleVariants).run();
-      await db.prepare('DELETE FROM media WHERE object_key LIKE ? OR object_key LIKE ?').bind(`users/@${handle}/%`, `users/${handle}/%`).run();
-    }
-
-    // 3. Delete Session & Hardware Device tokens
-    await db.prepare('DELETE FROM devices WHERE user_handle = ? OR user_handle = ?').bind(...handleVariants).run();
-    await db.prepare('DELETE FROM refresh_tokens WHERE user_handle = ? OR user_handle = ?').bind(...handleVariants).run();
-
-    // 4. Delete Profile and Root User record
-    await db.prepare('DELETE FROM profiles WHERE handle = ? OR handle = ?').bind(...handleVariants).run();
-    await db.prepare('DELETE FROM users WHERE handle = ? OR handle = ?').bind(...handleVariants).run();
 
     return c.json({
       success: true,
       message: `User @${handle} and all associated records permanently removed from D1 & R2`,
+      details: result,
     });
   } catch (e: any) {
     console.error('[AdminDeleteUser] Error:', e);
-    return c.json({ success: false, error: e.message }, 500);
+    return c.json({ success: false, error: e?.message || 'Admin delete user failed' }, 500);
   }
 });
 

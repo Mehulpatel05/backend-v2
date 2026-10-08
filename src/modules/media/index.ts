@@ -5,6 +5,7 @@ import { R2UserStorageHelper } from '../../utils/r2_helper';
 import { S3Client, PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { AppConfig } from '../../utils/config';
+import { createMediaSignature, verifyMediaSignature } from '../../utils/media_signing';
 
 const mediaApp = new Hono<{ Bindings: Env; Variables: Variables }>();
 
@@ -26,14 +27,23 @@ function getS3Client() {
 // Always return backend proxy URL — R2 bucket is private (not public)
 // Backend proxies the file from R2 with its own credentials
 function getProxyUrl(c: any, r2Path: string): string {
-  const rawHost = c.req.header('host') || '3.109.213.23';
-  const host = rawHost.replace(/:\d+$/, '');
-  const isIp = /^(?:\d{1,3}\.){3}\d{1,3}$/.test(host);
-  const protoHeader = c.req.header('x-forwarded-proto');
-  const protocol = protoHeader ? protoHeader : (isIp ? 'http' : 'https');
-  return `${protocol}://${rawHost}/api/v2/media/file/${r2Path}`;
+  let base = AppConfig.publicBaseUrl;
+  if (!base) {
+    const rawHost = c.req.header('host') || '3.109.213.23';
+    const host = rawHost.replace(/:\d+$/, '');
+    const isIp = /^(?:\d{1,3}\.){3}\d{1,3}$/.test(host);
+    const protoHeader = c.req.header('x-forwarded-proto');
+    const protocol = protoHeader ? protoHeader : (isIp ? 'http' : 'https');
+    base = `${protocol}://${rawHost}`;
+  }
+  return `${base}/api/v2/media/file/${r2Path}`;
 }
 
+const ALLOWED_MIME_TYPES = [
+  'image/jpeg', 'image/png', 'image/webp', 'image/gif',
+  'audio/mpeg', 'audio/mp4', 'audio/aac', 'audio/wav', 'audio/ogg', 'audio/m4a'
+];
+const MAX_UPLOAD_SIZE = 15 * 1024 * 1024; // 15 MB
 
 // 1. Direct Multipart/Binary Media Upload into User-Dedicated R2 Folder
 // Uses authMiddleware so we always get the real user handle from D1
@@ -50,6 +60,14 @@ mediaApp.post('/upload', authMiddleware, async (c) => {
 
   if (!file || !(file instanceof File)) {
     return c.json({ success: false, error: 'Valid file is required under "file" field' }, 400);
+  }
+
+  if (file.size > MAX_UPLOAD_SIZE) {
+    return c.json({ success: false, error: 'File size exceeds 15MB limit' }, 400);
+  }
+
+  if (file.type && !ALLOWED_MIME_TYPES.includes(file.type.toLowerCase())) {
+    return c.json({ success: false, error: 'Unsupported file type. Only standard images and audio are allowed.' }, 400);
   }
 
   let r2Path = '';
@@ -166,9 +184,31 @@ mediaApp.post('/presigned-url', authMiddleware, async (c) => {
 
 // 3. Stream / Serve File from R2 (Proxy — works because backend has R2 credentials)
 mediaApp.get('/file/*', async (c) => {
-  const path = c.req.path.replace(/^\/api\/v2\/(media|storage)\/file\//, '');
-  if (!path) {
+  const path = c.req.path.replace(/^(?:\/api\/v2)?\/(?:media|storage)\/file\//, '');
+  if (!path || path.includes('..') || path.startsWith('/') || path.includes('\\')) {
     return c.json({ success: false, error: 'Invalid path' }, 400);
+  }
+
+  const allowedPrefixes = ['users/', 'feed/', 'posts/', 'bazar/', 'profiles/', 'banners/', 'chat/', 'static/', 'misc/'];
+  const hasAllowedPrefix = allowedPrefixes.some((p) => path.startsWith(p));
+  if (!hasAllowedPrefix) {
+    return c.json({ success: false, error: 'Access denied: Unknown media location' }, 403);
+  }
+
+  // Private chat media verification
+  const isPrivateChatMedia = path.startsWith('users/') && path.includes('/chat/');
+  if (isPrivateChatMedia) {
+    const exp = c.req.query('exp') || '';
+    const sig = c.req.query('sig') || '';
+    const isValid = exp && sig ? await verifyMediaSignature(path, exp, sig) : false;
+
+    if (!isValid) {
+      if (AppConfig.mediaAllowLegacyUnsigned) {
+        console.warn(`[MediaAuth] Permitting legacy unsigned chat media access: ${path}`);
+      } else {
+        return c.json({ success: false, error: 'Forbidden: Valid media signature required' }, 403);
+      }
+    }
   }
 
   if (c.env && c.env.MEDIA_BUCKET) {
@@ -180,6 +220,7 @@ mediaApp.get('/file/*', async (c) => {
     object.writeHttpMetadata(headers);
     headers.set('etag', object.httpEtag);
     headers.set('Cache-Control', 'public, max-age=31536000, immutable');
+    headers.set('X-Content-Type-Options', 'nosniff');
     return new Response(object.body, { headers });
   } else {
     try {
@@ -192,6 +233,7 @@ mediaApp.get('/file/*', async (c) => {
       if (response.ContentType) headers.set('Content-Type', response.ContentType);
       headers.set('Cache-Control', 'public, max-age=31536000, immutable');
       headers.set('Access-Control-Allow-Origin', '*');
+      headers.set('X-Content-Type-Options', 'nosniff');
 
       const stream = response.Body as any;
       return new Response(stream, { headers });

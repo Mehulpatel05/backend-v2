@@ -28,12 +28,20 @@ export async function getOrCreateUserRewards(db: any, userHandle: string): Promi
   const today = getTodayString();
 
   if (!row) {
-    const randomCode = `NEAR-${clean.substring(0, 4).toUpperCase()}${Math.floor(100 + Math.random() * 900)}`;
-    await db.prepare(`
-      INSERT INTO user_rewards (user_handle, balance, lifetime_points, weekly_points, streak_count, last_streak_date, daily_points_today, daily_date, referral_code)
-      VALUES (?, 0, 0, 0, 0, '', 0, ?, ?)
-    `).bind(clean, today, randomCode).run();
-
+    let inserted = false;
+    for (let attempt = 0; attempt < 5 && !inserted; attempt++) {
+      const randomSuffix = Math.floor(1000 + Math.random() * 9000).toString();
+      const randomCode = `NEAR-${clean.substring(0, 4).toUpperCase()}${randomSuffix}`;
+      try {
+        await db.prepare(`
+          INSERT INTO user_rewards (user_handle, balance, lifetime_points, weekly_points, streak_count, last_streak_date, daily_points_today, daily_date, referral_code)
+          VALUES (?, 0, 0, 0, 0, '', 0, ?, ?)
+        `).bind(clean, today, randomCode).run();
+        inserted = true;
+      } catch (_) {
+        // Unique referral_code collision: retry
+      }
+    }
     row = await db.prepare('SELECT * FROM user_rewards WHERE user_handle = ?').bind(clean).first();
   } else if (row.daily_date !== today) {
     await db.prepare('UPDATE user_rewards SET daily_points_today = 0, daily_date = ? WHERE user_handle = ?')
@@ -409,6 +417,13 @@ rewardsApp.post('/referrals/apply', authMiddleware, async (c) => {
     return c.json({ success: false, error: 'Cannot refer yourself' }, 400);
   }
 
+  const existingReferral = await db.prepare(
+    'SELECT id FROM referrals WHERE LOWER(invitee_handle) = LOWER(?) OR LOWER(invitee_handle) = LOWER(?) LIMIT 1'
+  ).bind(clean, `@${clean}`).first();
+  if (existingReferral) {
+    return c.json({ success: false, error: 'You have already applied a referral code.' }, 400);
+  }
+
   const referralId = `ref_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
   try {
     await db.prepare(`
@@ -434,8 +449,8 @@ rewardsApp.post('/boost', authMiddleware, async (c) => {
     return c.json({ success: false, error: 'Listing ID is required' }, 400);
   }
 
-  const listing = await db.prepare('SELECT seller_handle FROM bazar_listings WHERE id = ?')
-    .bind(listingId).first() as any;
+  const listing = (await db.prepare('SELECT seller_handle FROM bazar_listings WHERE id = ?')
+    .bind(listingId).first()) as any;
   if (!listing) {
     return c.json({ success: false, error: 'Listing not found' }, 404);
   }
@@ -444,33 +459,39 @@ rewardsApp.post('/boost', authMiddleware, async (c) => {
     return c.json({ success: false, error: 'You can only boost your own listings.' }, 403);
   }
 
-  const activeBoost = await db.prepare('SELECT id FROM listing_boosts WHERE listing_id = ? AND ends_at > CURRENT_TIMESTAMP')
-    .bind(listingId).first() as any;
+  const activeBoost = (await db.prepare('SELECT id FROM listing_boosts WHERE listing_id = ? AND ends_at > datetime("now")')
+    .bind(listingId).first()) as any;
   if (activeBoost) {
     return c.json({ success: false, error: 'This listing is already currently boosted.' }, 400);
   }
 
-  const rewards = await getOrCreateUserRewards(db, clean);
-  if ((rewards.balance || 0) < BOOST_COST) {
-    return c.json({ success: false, error: `Insufficient points. You need ${BOOST_COST} points to boost.` }, 400);
+  await getOrCreateUserRewards(db, clean);
+  const boostCost = BOOST_COST;
+  const deductRes = await db.prepare(
+    'UPDATE user_rewards SET balance = balance - ? WHERE user_handle = ? AND balance >= ?'
+  ).bind(boostCost, clean, boostCost).run();
+
+  if (deductRes.meta?.changes === 0) {
+    return c.json({ success: false, error: `Insufficient points. You need ${boostCost} points to boost.` }, 400);
   }
 
   const boostId = `boost_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
   const endsAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
 
-  await db.prepare(`
-    INSERT INTO listing_boosts (id, listing_id, user_handle, area_id, starts_at, ends_at, cost_points)
-    VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?)
-  `).bind(boostId, listingId, clean, areaId, endsAt, BOOST_COST).run();
+  try {
+    await db.prepare(`
+      INSERT INTO listing_boosts (id, listing_id, user_handle, area_id, starts_at, ends_at, cost_points)
+      VALUES (?, ?, ?, ?, datetime('now'), datetime('now', '+1 day'), ?)
+    `).bind(boostId, listingId, clean, areaId, boostCost).run();
 
-  await awardPoints(db, {
-    userHandle: clean,
-    delta: -BOOST_COST,
-    reason: 'Featured in your area 24h boost',
-    refType: 'boost',
-    refId: boostId,
-    isAction: false,
-  });
+    await db.prepare(`
+      INSERT INTO points_ledger (id, user_handle, delta, reason, ref_type, ref_id)
+      VALUES (?, ?, ?, 'Featured in your area 24h boost', 'boost', ?)
+    `).bind(`pl_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`, clean, -boostCost, boostId).run();
+  } catch (err) {
+    await db.prepare('UPDATE user_rewards SET balance = balance + ? WHERE user_handle = ?').bind(boostCost, clean).run().catch(() => {});
+    return c.json({ success: false, error: 'Could not boost listing. Points have been refunded.' }, 500);
+  }
 
   return c.json({
     success: true,
@@ -481,13 +502,13 @@ rewardsApp.post('/boost', authMiddleware, async (c) => {
 
 rewardsApp.get('/perks', authMiddleware, async (c) => {
   const db = getDatabase(c);
-  const perks = await db.prepare(`
+  const perks = (await db.prepare(`
     SELECT sc.*, bs.shop_name, bs.category, bs.logo_r2_path, bs.address
     FROM shop_coupons sc
     JOIN bazar_shops bs ON sc.shop_id = bs.id
     WHERE sc.active = 1
     ORDER BY sc.created_at DESC
-  `).all() as any;
+  `).all()) as any;
 
   return c.json({
     success: true,
@@ -506,15 +527,34 @@ rewardsApp.post('/coupons/unlock', authMiddleware, async (c) => {
     return c.json({ success: false, error: 'Coupon ID is required' }, 400);
   }
 
-  const coupon = await db.prepare('SELECT * FROM shop_coupons WHERE id = ? AND active = 1')
-    .bind(couponId).first() as any;
+  const coupon = (await db.prepare('SELECT * FROM shop_coupons WHERE id = ? AND active = 1')
+    .bind(couponId).first()) as any;
   if (!coupon) {
     return c.json({ success: false, error: 'Coupon not found or inactive' }, 404);
   }
 
+  if (coupon.expires_at && new Date(coupon.expires_at).getTime() < Date.now()) {
+    return c.json({ success: false, error: 'This coupon has expired' }, 400);
+  }
+
+  if (coupon.daily_limit && coupon.daily_limit > 0) {
+    const todayUnlocks = (await db.prepare(`
+      SELECT COUNT(*) as cnt FROM user_coupons
+      WHERE coupon_id = ? AND date(created_at) = date('now')
+    `).bind(couponId).first()) as any;
+    if ((todayUnlocks?.cnt || 0) >= coupon.daily_limit) {
+      return c.json({ success: false, error: 'Daily limit for this coupon has been reached for today.' }, 400);
+    }
+  }
+
   const cost = coupon.cost_points || 100;
-  const rewards = await getOrCreateUserRewards(db, clean);
-  if ((rewards.balance || 0) < cost) {
+  await getOrCreateUserRewards(db, clean);
+
+  const deductRes = await db.prepare(
+    'UPDATE user_rewards SET balance = balance - ? WHERE user_handle = ? AND balance >= ?'
+  ).bind(cost, clean, cost).run();
+
+  if (deductRes.meta?.changes === 0) {
     return c.json({ success: false, error: `Need ${cost} points to unlock this coupon.` }, 400);
   }
 
@@ -522,19 +562,20 @@ rewardsApp.post('/coupons/unlock', authMiddleware, async (c) => {
   const code = `NH-${Math.random().toString(36).substring(2, 7).toUpperCase()}`;
   const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
 
-  await db.prepare(`
-    INSERT INTO user_coupons (id, user_handle, coupon_id, code, expires_at, status, created_at)
-    VALUES (?, ?, ?, ?, ?, 'active', CURRENT_TIMESTAMP)
-  `).bind(userCouponId, clean, couponId, code, expiresAt).run();
+  try {
+    await db.prepare(`
+      INSERT INTO user_coupons (id, user_handle, coupon_id, code, expires_at, status, created_at)
+      VALUES (?, ?, ?, ?, datetime('now', '+7 days'), 'active', CURRENT_TIMESTAMP)
+    `).bind(userCouponId, clean, couponId, code).run();
 
-  await awardPoints(db, {
-    userHandle: clean,
-    delta: -cost,
-    reason: `Unlocked ${coupon.title} coupon`,
-    refType: 'coupon',
-    refId: userCouponId,
-    isAction: false,
-  });
+    await db.prepare(`
+      INSERT INTO points_ledger (id, user_handle, delta, reason, ref_type, ref_id)
+      VALUES (?, ?, ?, ?, 'coupon', ?)
+    `).bind(`pl_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`, clean, -cost, `Unlocked ${coupon.title} coupon`, userCouponId).run();
+  } catch (err) {
+    await db.prepare('UPDATE user_rewards SET balance = balance + ? WHERE user_handle = ?').bind(cost, clean).run().catch(() => {});
+    return c.json({ success: false, error: 'Could not unlock coupon. Points have been refunded.' }, 500);
+  }
 
   return c.json({
     success: true,

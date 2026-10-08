@@ -58,8 +58,14 @@ profileApp.get('/:handle', async (c) => {
   return c.json({
     success: true,
     profile: {
-      ...profile,
       handle: profile.handle.replace(/^@+/, '').trim(),
+      displayName: profile.display_name || profile.handle.replace(/^@+/, '').trim(),
+      display_name: profile.display_name || profile.handle.replace(/^@+/, '').trim(),
+      bio: profile.bio || '',
+      avatar_r2_path: profile.avatar_r2_path || '',
+      banner_r2_path: profile.banner_r2_path || '',
+      friend_count: profile.friend_count || 0,
+      friendCount: profile.friend_count || 0,
       photoUrl: profile.avatar_r2_path || null,
       avatarUrl: profile.avatar_r2_path || null,
       isVerified,
@@ -128,21 +134,24 @@ profileApp.put('/', authMiddleware, async (c) => {
     }
 
     if (cleanNewHandle !== cleanUserHandle) {
-      // 30 Days Cooldown Check for Username
-      const handleCooldown = calculateCooldown(currentProfile?.handle_updated_at, HANDLE_COOLDOWN_MS);
-      if (!handleCooldown.canChange) {
-        const nextDateStr = new Date(handleCooldown.nextAvailableAt!).toLocaleDateString('en-IN', {
-          day: 'numeric',
-          month: 'short',
-          year: 'numeric'
-        });
-        return c.json({
-          success: false,
-          code: 'HANDLE_COOLDOWN',
-          daysRemaining: handleCooldown.daysRemaining,
-          nextAvailableAt: handleCooldown.nextAvailableAt,
-          error: `Username can only be changed once every 30 days. You can change it again in ${handleCooldown.daysRemaining} day(s) (${nextDateStr}).`
-        }, 400);
+      const isInitialHandle = cleanUserHandle.startsWith('user_') || cleanUserHandle.startsWith('anon#');
+      if (!isInitialHandle) {
+        // 30 Days Cooldown Check for Username
+        const handleCooldown = calculateCooldown(currentProfile?.handle_updated_at, HANDLE_COOLDOWN_MS);
+        if (!handleCooldown.canChange) {
+          const nextDateStr = new Date(handleCooldown.nextAvailableAt!).toLocaleDateString('en-IN', {
+            day: 'numeric',
+            month: 'short',
+            year: 'numeric'
+          });
+          return c.json({
+            success: false,
+            code: 'HANDLE_COOLDOWN',
+            daysRemaining: handleCooldown.daysRemaining,
+            nextAvailableAt: handleCooldown.nextAvailableAt,
+            error: `Username can only be changed once every 30 days. You can change it again in ${handleCooldown.daysRemaining} day(s) (${nextDateStr}).`
+          }, 400);
+        }
       }
 
       // Check uniqueness in users table
@@ -218,23 +227,32 @@ profileApp.put('/', authMiddleware, async (c) => {
   // 2. Handle Full Name Change with 14 Days Cooldown Check
   if (displayName !== undefined) {
     const cleanNewName = String(displayName).trim();
+    if (cleanNewName.length === 0) {
+      return c.json({
+        success: false,
+        error: 'Full name cannot be empty.'
+      }, 400);
+    }
     const currentName = (currentProfile?.display_name || '').trim();
 
-    if (cleanNewName.length > 0 && cleanNewName.toLowerCase() !== currentName.toLowerCase()) {
-      const nameCooldown = calculateCooldown(currentProfile?.name_updated_at, NAME_COOLDOWN_MS);
-      if (!nameCooldown.canChange) {
-        const nextDateStr = new Date(nameCooldown.nextAvailableAt!).toLocaleDateString('en-IN', {
-          day: 'numeric',
-          month: 'short',
-          year: 'numeric'
-        });
-        return c.json({
-          success: false,
-          code: 'NAME_COOLDOWN',
-          daysRemaining: nameCooldown.daysRemaining,
-          nextAvailableAt: nameCooldown.nextAvailableAt,
-          error: `Full name can only be changed once every 14 days. You can change it again in ${nameCooldown.daysRemaining} day(s) (${nextDateStr}).`
-        }, 400);
+    if (cleanNewName.toLowerCase() !== currentName.toLowerCase()) {
+      const isInitialName = currentName.startsWith('User ') || currentName.length === 0;
+      if (!isInitialName) {
+        const nameCooldown = calculateCooldown(currentProfile?.name_updated_at, NAME_COOLDOWN_MS);
+        if (!nameCooldown.canChange) {
+          const nextDateStr = new Date(nameCooldown.nextAvailableAt!).toLocaleDateString('en-IN', {
+            day: 'numeric',
+            month: 'short',
+            year: 'numeric'
+          });
+          return c.json({
+            success: false,
+            code: 'NAME_COOLDOWN',
+            daysRemaining: nameCooldown.daysRemaining,
+            nextAvailableAt: nameCooldown.nextAvailableAt,
+            error: `Full name can only be changed once every 14 days. You can change it again in ${nameCooldown.daysRemaining} day(s) (${nextDateStr}).`
+          }, 400);
+        }
       }
       nameChanged = true;
     }

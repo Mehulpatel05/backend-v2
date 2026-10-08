@@ -3,6 +3,7 @@ import { Env, Variables } from '../../types';
 import { authMiddleware } from '../../middleware/auth';
 import { getDatabase } from '../../db/db_context';
 import { sendPushNotification } from '../../services/fcm_service';
+import { isBlockedBetween } from '../../utils/blocks';
 
 const chatApp = new Hono<{ Bindings: Env; Variables: Variables }>();
 
@@ -91,21 +92,59 @@ chatApp.get('/', authMiddleware, async (c) => {
 
 // 2. Get Messages for a Chat
 chatApp.get('/:chatId/messages', authMiddleware, async (c) => {
+  const user = c.get('user');
+  const myHandle = (user.userHandle || '').replace(/^@+/, '').trim().toLowerCase();
   const rawChatId = c.req.param('chatId') || '';
   const chatId = rawChatId.replace(/^@+/, '').trim().toLowerCase();
   const limit = parseInt(c.req.query('limit') || '50', 10);
   const before = c.req.query('before');
   const db = getDatabase(c);
 
-  let query = 'SELECT * FROM chat_messages WHERE LOWER(chat_id) = ?';
-  const params: any[] = [chatId];
+  const parts = chatId.split('_');
+  const isParticipantByNaming = parts.length === 2 && (parts[0] === myHandle || parts[1] === myHandle);
 
-  if (before) {
-    query += ' AND (created_at < ? OR id < ?)';
-    params.push(before, before);
+  const chatRow = await db.prepare(
+    `SELECT canonical_id, user1_handle, user2_handle FROM chats
+     WHERE (LOWER(canonical_id) = ? OR LOWER(id) = ?)
+       AND (LOWER(REPLACE(user1_handle, '@', '')) = ? OR LOWER(REPLACE(user2_handle, '@', '')) = ?)
+     LIMIT 1`
+  ).bind(chatId, chatId, myHandle, myHandle).first();
+
+  if (!chatRow && !isParticipantByNaming) {
+    return c.json({ success: false, error: 'Forbidden: You are not a participant in this conversation' }, 403);
   }
 
-  query += ' ORDER BY created_at ASC LIMIT ?';
+  let query = `
+    SELECT * FROM (
+      SELECT * FROM chat_messages
+      WHERE LOWER(chat_id) = ?
+        AND NOT (LOWER(REPLACE(sender_handle, '@', '')) = ? AND COALESCE(deleted_by_sender, 0) = 1)
+        AND NOT (LOWER(REPLACE(receiver_handle, '@', '')) = ? AND COALESCE(deleted_by_receiver, 0) = 1)
+  `;
+  const params: any[] = [chatId, myHandle, myHandle];
+
+  if (before) {
+    if (/^\d+$/.test(before)) {
+      const date = new Date(parseInt(before, 10));
+      if (!isNaN(date.getTime())) {
+        query += ' AND created_at < ?';
+        params.push(date.toISOString().replace('T', ' ').substring(0, 19));
+      } else {
+        query += ' AND created_at < ?';
+        params.push(before);
+      }
+    } else {
+      query += ' AND created_at < ?';
+      params.push(before);
+    }
+  }
+
+  query += `
+      ORDER BY created_at DESC, id DESC
+      LIMIT ?
+    ) sub
+    ORDER BY created_at ASC, id ASC
+  `;
   params.push(limit);
 
   const { results } = await db.prepare(query).bind(...params).all();
@@ -149,14 +188,32 @@ async function handleSendMessage(c: any) {
     return c.json({ success: false, error: 'Receiver handle is required' }, 400);
   }
 
+  if (receiver === myHandle) {
+    return c.json({ success: false, error: 'Cannot send message to yourself' }, 400);
+  }
+
   if (!content && !mediaR2Path) {
     return c.json({ success: false, error: 'Message content cannot be empty' }, 400);
+  }
+
+  const db = getDatabase(c);
+
+  // Check if users are blocked
+  if (await isBlockedBetween(db, myHandle, receiver)) {
+    return c.json({ success: false, error: 'Cannot send message: user is blocked' }, 403);
+  }
+
+  // Ensure receiver exists
+  const receiverUser = await db.prepare(
+    'SELECT handle FROM users WHERE LOWER(handle) = ? OR LOWER(handle) = ? LIMIT 1'
+  ).bind(receiver, `@${receiver}`).first();
+  if (!receiverUser) {
+    return c.json({ success: false, error: 'Receiver user not found' }, 404);
   }
 
   const canonicalId = getCanonicalChatId(myHandle, receiver);
   const now = Date.now();
   const msgId = `msg_${now}_${Math.floor(1000 + Math.random() * 9000)}`;
-  const db = getDatabase(c);
 
   const sorted = [myHandle, receiver].sort();
   const user1 = sorted[0];
@@ -165,56 +222,49 @@ async function handleSendMessage(c: any) {
 
   const previewText = content || (messageType === 'image' ? '📷 Photo' : (messageType === 'voice_note' ? '🎤 Voice note' : 'Message'));
 
-  // Ensure profiles exist for both
-  try {
-    await db.batch([
-      db.prepare(`INSERT INTO users (id, phone, handle) VALUES (?, ?, ?) ON CONFLICT(handle) DO NOTHING`)
-        .bind(`u_${receiver}`, `guest_${receiver}`, receiver),
-      db.prepare(`INSERT INTO profiles (handle, user_id, display_name) VALUES (?, ?, ?) ON CONFLICT(handle) DO NOTHING`)
-        .bind(receiver, `u_${receiver}`, receiver),
-    ]);
-  } catch (_) {}
+  // 1. Insert chat message first
+  await db.prepare(
+    `INSERT INTO chat_messages (
+      id, chat_id, sender_handle, receiver_handle,
+      content, media_r2_path, message_type, is_read, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP)`
+  ).bind(
+    msgId,
+    canonicalId,
+    myHandle,
+    receiver,
+    content,
+    mediaR2Path,
+    messageType
+  ).run();
 
-  await db.batch([
-    db.prepare(
-      `INSERT INTO chats (
-        id, canonical_id, user1_handle, user2_handle,
-        last_message, last_message_type, last_timestamp,
-        unread_count_user1, unread_count_user2, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-      ON CONFLICT(canonical_id) DO UPDATE SET
-        last_message = excluded.last_message,
-        last_message_type = excluded.last_message_type,
-        last_timestamp = excluded.last_timestamp,
-        unread_count_user1 = unread_count_user1 + ${isSenderUser1 ? 0 : 1},
-        unread_count_user2 = unread_count_user2 + ${isSenderUser1 ? 1 : 0},
-        updated_at = CURRENT_TIMESTAMP`
-    ).bind(
-      canonicalId,
-      canonicalId,
-      user1,
-      user2,
-      previewText,
-      messageType,
-      now,
-      isSenderUser1 ? 0 : 1,
-      isSenderUser1 ? 1 : 0
-    ),
-    db.prepare(
-      `INSERT INTO chat_messages (
-        id, chat_id, sender_handle, receiver_handle,
-        content, media_r2_path, message_type, is_read, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP)`
-    ).bind(
-      msgId,
-      canonicalId,
-      myHandle,
-      receiver,
-      content,
-      mediaR2Path,
-      messageType
-    ),
-  ]);
+  // 2. Update/create chat summary with bound increment values
+  await db.prepare(
+    `INSERT INTO chats (
+      id, canonical_id, user1_handle, user2_handle,
+      last_message, last_message_type, last_timestamp,
+      unread_count_user1, unread_count_user2, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(canonical_id) DO UPDATE SET
+      last_message = excluded.last_message,
+      last_message_type = excluded.last_message_type,
+      last_timestamp = excluded.last_timestamp,
+      unread_count_user1 = unread_count_user1 + ?,
+      unread_count_user2 = unread_count_user2 + ?,
+      updated_at = CURRENT_TIMESTAMP`
+  ).bind(
+    canonicalId,
+    canonicalId,
+    user1,
+    user2,
+    previewText,
+    messageType,
+    now,
+    isSenderUser1 ? 0 : 1,
+    isSenderUser1 ? 1 : 0,
+    isSenderUser1 ? 0 : 1,
+    isSenderUser1 ? 1 : 0
+  ).run();
 
   // Trigger Notification to Receiver
   try {
@@ -239,7 +289,7 @@ async function handleSendMessage(c: any) {
     };
 
     await db.prepare(
-      `INSERT INTO notifications (id, target_handle, sender_handle, type, title, body, data_json)
+      `INSERT INTO notifications (id, target_handle, sender_handle, type, title, body, payload_json)
        VALUES (?, ?, ?, 'chat', ?, ?, ?)`
     ).bind(
       notifId,
@@ -281,6 +331,20 @@ chatApp.post('/:chatId/read', authMiddleware, async (c) => {
   const rawChatId = c.req.param('chatId') || '';
   const chatId = rawChatId.replace(/^@+/, '').trim().toLowerCase();
   const db = getDatabase(c);
+
+  const parts = chatId.split('_');
+  const isParticipantByNaming = parts.length === 2 && (parts[0] === myHandle || parts[1] === myHandle);
+
+  const chatRow = await db.prepare(
+    `SELECT canonical_id, user1_handle, user2_handle FROM chats 
+     WHERE (LOWER(canonical_id) = ? OR LOWER(id) = ?)
+       AND (LOWER(REPLACE(user1_handle, '@', '')) = ? OR LOWER(REPLACE(user2_handle, '@', '')) = ?)
+     LIMIT 1`
+  ).bind(chatId, chatId, myHandle, myHandle).first();
+
+  if (!chatRow && !isParticipantByNaming) {
+    return c.json({ success: false, error: 'Forbidden: You are not a participant in this conversation' }, 403);
+  }
 
   await db.batch([
     db.prepare(
@@ -329,13 +393,19 @@ chatApp.put('/message/:messageId', authMiddleware, async (c) => {
 
   const db = getDatabase(c);
   const msg = (await db.prepare(
-    'SELECT * FROM chat_messages WHERE id = ? AND LOWER(sender_handle) = ? LIMIT 1'
+    'SELECT * FROM chat_messages WHERE id = ? AND LOWER(REPLACE(sender_handle, "@", "")) = ? LIMIT 1'
   )
     .bind(messageId, myHandle)
     .first()) as any;
 
   if (!msg) {
     return c.json({ success: false, error: 'Message not found or unauthorized' }, 404);
+  }
+
+  const createdAtMs = new Date(msg.created_at).getTime();
+  const fifteenMinutesMs = 15 * 60 * 1000;
+  if (!isNaN(createdAtMs) && Date.now() - createdAtMs > fifteenMinutesMs) {
+    return c.json({ success: false, error: 'Edit window expired (15 minutes limit)' }, 403);
   }
 
   await db.prepare(
@@ -361,19 +431,47 @@ chatApp.delete('/message/:messageId', authMiddleware, async (c) => {
   const forEveryone = body.for_everyone === true || body.forEveryone === true;
 
   const db = getDatabase(c);
+  const msg = (await db.prepare(
+    'SELECT * FROM chat_messages WHERE id = ? LIMIT 1'
+  )
+    .bind(messageId)
+    .first()) as any;
+
+  if (!msg) {
+    return c.json({ success: false, error: 'Message not found' }, 404);
+  }
+
+  const sender = (msg.sender_handle || '').replace(/^@+/, '').trim().toLowerCase();
+  const receiver = (msg.receiver_handle || '').replace(/^@+/, '').trim().toLowerCase();
+
+  if (myHandle !== sender && myHandle !== receiver) {
+    return c.json({ success: false, error: 'Forbidden' }, 403);
+  }
 
   if (forEveryone) {
-    await db.prepare(
-      `DELETE FROM chat_messages WHERE id = ? AND LOWER(sender_handle) = ?`
-    )
-      .bind(messageId, myHandle)
-      .run();
+    if (myHandle !== sender) {
+      return c.json({ success: false, error: 'Only the sender can delete this message for everyone' }, 403);
+    }
+    const createdAtMs = new Date(msg.created_at).getTime();
+    const fortyEightHoursMs = 48 * 60 * 60 * 1000;
+    if (!isNaN(createdAtMs) && Date.now() - createdAtMs > fortyEightHoursMs) {
+      return c.json({ success: false, error: 'Delete window expired (48 hours limit)' }, 403);
+    }
+    await db.prepare('DELETE FROM chat_messages WHERE id = ?').bind(messageId).run();
   } else {
-    await db.prepare(
-      `DELETE FROM chat_messages WHERE id = ? AND (LOWER(sender_handle) = ? OR LOWER(receiver_handle) = ?)`
-    )
-      .bind(messageId, myHandle, myHandle)
-      .run();
+    if (myHandle === sender) {
+      if (Number(msg.deleted_by_receiver) === 1) {
+        await db.prepare('DELETE FROM chat_messages WHERE id = ?').bind(messageId).run();
+      } else {
+        await db.prepare('UPDATE chat_messages SET deleted_by_sender = 1 WHERE id = ?').bind(messageId).run();
+      }
+    } else {
+      if (Number(msg.deleted_by_sender) === 1) {
+        await db.prepare('DELETE FROM chat_messages WHERE id = ?').bind(messageId).run();
+      } else {
+        await db.prepare('UPDATE chat_messages SET deleted_by_receiver = 1 WHERE id = ?').bind(messageId).run();
+      }
+    }
   }
 
   return c.json({ success: true, messageId, message: 'Message deleted successfully' });

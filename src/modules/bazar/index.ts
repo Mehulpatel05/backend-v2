@@ -8,7 +8,11 @@ const bazarApp = new Hono<{ Bindings: Env; Variables: Variables }>();
 
 // 1. Get Marketplace Listings (Feed)
 bazarApp.get('/listings', async (c) => {
-  const { category, search, seller, limit = '50', offset = '0' } = c.req.query();
+  const { category, search, seller } = c.req.query();
+  const rawLimit = parseInt(c.req.query('limit') || '50', 10);
+  const limit = isNaN(rawLimit) ? 50 : Math.min(Math.max(rawLimit, 1), 100);
+  const rawOffset = parseInt(c.req.query('offset') || '0', 10);
+  const offset = isNaN(rawOffset) ? 0 : Math.max(rawOffset, 0);
 
   let query = `
     SELECT b.*,
@@ -22,7 +26,12 @@ bazarApp.get('/listings', async (c) => {
     FROM bazar_listings b
     LEFT JOIN profiles pr ON (LOWER(b.seller_handle) = LOWER(pr.handle) OR LOWER(b.seller_handle) = '@' || LOWER(pr.handle) OR '@' || LOWER(b.seller_handle) = LOWER(pr.handle))
     LEFT JOIN area_founders af ON (LOWER(af.user_id) = LOWER(b.seller_handle) OR LOWER(af.user_id) = LOWER(REPLACE(b.seller_handle, '@', '')))
-    LEFT JOIN listing_boosts lb ON b.id = lb.listing_id AND lb.ends_at > CURRENT_TIMESTAMP
+    LEFT JOIN (
+      SELECT listing_id, MAX(id) as id, MAX(ends_at) as ends_at
+      FROM listing_boosts
+      WHERE ends_at > CURRENT_TIMESTAMP
+      GROUP BY listing_id
+    ) lb ON b.id = lb.listing_id
     WHERE b.is_active = 1
   `;
   const params: any[] = [];
@@ -37,12 +46,13 @@ bazarApp.get('/listings', async (c) => {
     params.push(cleanSeller, `@${cleanSeller}`);
   }
   if (search) {
-    query += ' AND (b.title LIKE ? OR b.description LIKE ?)';
-    params.push(`%${search}%`, `%${search}%`);
+    const escaped = search.replace(/[%_]/g, '\\$&');
+    query += ' AND (b.title LIKE ? ESCAPE "\\" OR b.description LIKE ? ESCAPE "\\")';
+    params.push(`%${escaped}%`, `%${escaped}%`);
   }
 
   query += ' ORDER BY CASE WHEN lb.id IS NOT NULL THEN 1 ELSE 0 END DESC, b.created_at DESC LIMIT ? OFFSET ?';
-  params.push(parseInt(limit), parseInt(offset));
+  params.push(limit, offset);
 
   const db = getDatabase(c);
   const { results } = await db.prepare(query).bind(...params).all();
@@ -110,8 +120,13 @@ bazarApp.post('/listings', authMiddleware, async (c) => {
     shopId = null,
   } = body;
 
-  if (!title || price === undefined || !description) {
-    return c.json({ success: false, error: 'Title, price, and description are required' }, 400);
+  const numPrice = Number(price);
+  if (!title || price === undefined || !description || isNaN(numPrice) || numPrice < 0) {
+    return c.json({ success: false, error: 'Valid title, non-negative price, and description are required' }, 400);
+  }
+
+  if (title.length > 200 || description.length > 5000) {
+    return c.json({ success: false, error: 'Title (max 200) or description (max 5000) exceeds character limit' }, 400);
   }
 
   const finalImages = Array.isArray(imageUrls) && imageUrls.length > 0 
@@ -134,7 +149,7 @@ bazarApp.post('/listings', authMiddleware, async (c) => {
       cleanHandle,
       shopId,
       title,
-      parseInt(price),
+      Math.round(numPrice),
       originalPrice.toString(),
       description,
       category,
@@ -146,6 +161,7 @@ bazarApp.post('/listings', authMiddleware, async (c) => {
 
   let pointsAwarded = 0;
   let dailyCapReached = false;
+  let newBalance: number | undefined;
 
   if (finalImages.length > 0) {
     try {
@@ -159,6 +175,7 @@ bazarApp.post('/listings', authMiddleware, async (c) => {
       });
       pointsAwarded = rewardResult.awardedDelta;
       dailyCapReached = rewardResult.capReached ?? false;
+      newBalance = rewardResult.newBalance;
 
       const pendingRef = await db.prepare("SELECT * FROM referrals WHERE invitee_handle = ? AND status = 'pending'")
         .bind(cleanHandle).first() as any;
@@ -190,6 +207,7 @@ bazarApp.post('/listings', authMiddleware, async (c) => {
     listingId: id,
     pointsAwarded,
     dailyCapReached,
+    newBalance,
     listing: {
       id,
       seller_handle: cleanHandle,
@@ -213,7 +231,7 @@ bazarApp.post('/listings', authMiddleware, async (c) => {
       createdAt: new Date().toISOString(),
     },
     message: 'Listing created successfully',
-  });
+  }, 201);
 });
 
 // 3. Get Current User's Listings
@@ -231,7 +249,13 @@ bazarApp.get('/my-listings', authMiddleware, async (c) => {
     ...row,
     sellerHandle: (row.seller_handle || '').replace(/^@+/, '').trim(),
     seller_handle: (row.seller_handle || '').replace(/^@+/, '').trim(),
-    imageUrls: JSON.parse(row.image_urls_json || '[]'),
+    imageUrls: (() => {
+      try {
+        return JSON.parse(row.image_urls_json || '[]');
+      } catch (_) {
+        return [];
+      }
+    })(),
   }));
 
   return c.json({
@@ -351,18 +375,11 @@ bazarApp.post('/shops', authMiddleware, async (c) => {
   const shopId = `shop_${cleanHandle}`;
   const db = getDatabase(c);
 
-  // Ensure user exists in users table to prevent FK failure
-  try {
-    await db.prepare(
-      'INSERT OR IGNORE INTO users (id, phone, handle) VALUES (?, ?, ?)'
-    ).bind(`u_${cleanHandle}`, `user_${cleanHandle}`, cleanHandle).run();
-  } catch (_) {}
-
   await db.prepare(
     `INSERT INTO bazar_shops (
       id, owner_handle, shop_name, category, address, phone,
       banner_r2_path, logo_r2_path, description, status
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
     ON CONFLICT(id) DO UPDATE SET
       shop_name = excluded.shop_name,
       category = excluded.category,
@@ -403,7 +420,7 @@ bazarApp.post('/shops', authMiddleware, async (c) => {
       sameWhatsapp: !!sameWhatsapp,
       isOpen: !!isOpen,
       status: 'active',
-      isVerified: true,
+      isVerified: false,
     },
     message: 'Shop registered successfully',
   });
@@ -632,7 +649,7 @@ bazarApp.get('/my-shop', authMiddleware, async (c) => {
 
   const totalViews = (products || []).reduce((sum: number, p: any) => sum + (p.views_count || 0), 0);
   const totalChats = (products || []).reduce((sum: number, p: any) => sum + (p.chats_count || 0), 0);
-  const totalOrders = Math.round(totalChats * 0.35);
+  const totalOrders = 0;
 
   return c.json({
     success: true,
@@ -681,9 +698,10 @@ bazarApp.put('/shops/:id', authMiddleware, async (c) => {
     bannerR2Path,
     logoR2Path,
     description,
-    status = 'active',
+    status,
   } = body;
 
+  const cleanUserHandle = (user.userHandle || '').replace(/^@+/, '').trim().toLowerCase();
   const res = await db.prepare(
     `UPDATE bazar_shops SET
       shop_name = COALESCE(?, shop_name),
@@ -694,7 +712,7 @@ bazarApp.put('/shops/:id', authMiddleware, async (c) => {
       logo_r2_path = COALESCE(?, logo_r2_path),
       description = COALESCE(?, description),
       status = COALESCE(?, status)
-    WHERE id = ? AND (owner_handle = ? OR owner_handle = ?)`
+    WHERE id = ? AND (LOWER(owner_handle) = ? OR LOWER(owner_handle) = ?)`
   )
     .bind(
       shopName || null,
@@ -706,8 +724,8 @@ bazarApp.put('/shops/:id', authMiddleware, async (c) => {
       description || null,
       status || null,
       shopId,
-      user.userHandle,
-      user.userHandle.replace('@', '')
+      cleanUserHandle,
+      `@${cleanUserHandle}`
     )
     .run();
 
@@ -900,24 +918,42 @@ bazarApp.get('/my-shop/insights', authMiddleware, async (c) => {
 // 6. Get Saved Listings for User
 bazarApp.get('/saved', authMiddleware, async (c) => {
   const user = c.get('user');
+  const cleanUser = (user.userHandle || '').replace(/^@+/, '').trim().toLowerCase();
   const db = getDatabase(c);
   const { results } = await db.prepare(
     `SELECT l.* FROM bazar_listings l
      JOIN bazar_saved s ON l.id = s.listing_id
-     WHERE s.user_handle = ?
+     WHERE LOWER(s.user_handle) = ? OR LOWER(s.user_handle) = ?
      ORDER BY s.created_at DESC`
   )
-    .bind(user.userHandle)
+    .bind(cleanUser, `@${cleanUser}`)
     .all();
 
   const formatted = (results || []).map((row: any) => ({
     ...row,
-    imageUrls: JSON.parse(row.image_urls_json || '[]'),
+    imageUrls: (() => {
+      try {
+        return JSON.parse(row.image_urls_json || '[]');
+      } catch (_) {
+        return [];
+      }
+    })(),
   }));
+
+  const shopsRes = await db.prepare(
+    `SELECT sh.* FROM bazar_shops sh
+     JOIN bazar_saved_shops ss ON sh.id = ss.shop_id
+     WHERE LOWER(ss.user_handle) = ? OR LOWER(ss.user_handle) = ?
+     ORDER BY ss.created_at DESC`
+  )
+    .bind(cleanUser, `@${cleanUser}`)
+    .all()
+    .catch(() => ({ results: [] }));
 
   return c.json({
     success: true,
     savedListings: formatted,
+    savedShops: shopsRes.results || [],
   });
 });
 
@@ -958,12 +994,10 @@ bazarApp.post('/shops/:id/chat-inquiry', authMiddleware, async (c) => {
   const shopId = c.req.param('id');
   const db = getDatabase(c);
 
-  await db.prepare(
-    'UPDATE bazar_listings SET chats_count = chats_count + 1 WHERE shop_id = ?'
-  )
-    .bind(shopId)
-    .run()
-    .catch(() => {});
+  const shop = await db.prepare('SELECT id FROM bazar_shops WHERE id = ? LIMIT 1').bind(shopId).first();
+  if (!shop) {
+    return c.json({ success: false, error: 'Shop not found' }, 404);
+  }
 
   return c.json({ success: true, message: 'Shop chat inquiry recorded' });
 });
@@ -989,14 +1023,27 @@ bazarApp.delete('/shops/:id', authMiddleware, async (c) => {
   const db = getDatabase(c);
 
   try {
-    await db.batch([
-      db.prepare('DELETE FROM bazar_shops WHERE id = ? AND (owner_handle = ? OR owner_handle = ?)').bind(shopId, user.userHandle, `@${user.userHandle}`),
-      db.prepare('DELETE FROM bazar_listings WHERE shop_id = ?').bind(shopId),
-    ]);
+    const shop = await db.prepare(
+      'SELECT id FROM bazar_shops WHERE id = ? AND (owner_handle = ? OR owner_handle = ?) LIMIT 1'
+    ).bind(shopId, user.userHandle, `@${user.userHandle}`).first();
+
+    if (!shop) {
+      return c.json({ success: false, error: 'Shop not found or unauthorized' }, 404);
+    }
+
+    await db.prepare(
+      `DELETE FROM bazar_listings 
+       WHERE shop_id = ? 
+         AND shop_id IN (SELECT id FROM bazar_shops WHERE id = ? AND (owner_handle = ? OR owner_handle = ?))`
+    ).bind(shopId, shopId, user.userHandle, `@${user.userHandle}`).run();
+
+    await db.prepare(
+      'DELETE FROM bazar_shops WHERE id = ? AND (owner_handle = ? OR owner_handle = ?)'
+    ).bind(shopId, user.userHandle, `@${user.userHandle}`).run();
 
     return c.json({ success: true, message: 'Shop and its listings deleted successfully' });
   } catch (e: any) {
-    return c.json({ success: false, error: e.message }, 500);
+    return c.json({ success: false, error: e?.message || 'Failed to delete shop' }, 500);
   }
 });
 
@@ -1004,23 +1051,24 @@ bazarApp.delete('/shops/:id', authMiddleware, async (c) => {
 bazarApp.post('/shops/:id/save', authMiddleware, async (c) => {
   const user = c.get('user');
   const shopId = c.req.param('id');
+  const cleanUser = (user.userHandle || '').replace(/^@+/, '').trim().toLowerCase();
   const db = getDatabase(c);
 
   try {
     const existing = await db.prepare(
-      'SELECT id FROM bazar_saved WHERE user_handle = ? AND listing_id = ? LIMIT 1'
+      'SELECT id FROM bazar_saved_shops WHERE (LOWER(user_handle) = ? OR LOWER(user_handle) = ?) AND shop_id = ? LIMIT 1'
     )
-      .bind(user.userHandle, shopId)
+      .bind(cleanUser, `@${cleanUser}`, shopId)
       .first();
 
     if (existing) {
-      await db.prepare('DELETE FROM bazar_saved WHERE user_handle = ? AND listing_id = ?')
-        .bind(user.userHandle, shopId)
+      await db.prepare('DELETE FROM bazar_saved_shops WHERE (LOWER(user_handle) = ? OR LOWER(user_handle) = ?) AND shop_id = ?')
+        .bind(cleanUser, `@${cleanUser}`, shopId)
         .run();
       return c.json({ success: true, isSaved: false, message: 'Shop unsaved' });
     } else {
-      await db.prepare('INSERT INTO bazar_saved (id, user_handle, listing_id) VALUES (?, ?, ?)')
-        .bind(`save_${Date.now()}`, user.userHandle, shopId)
+      await db.prepare('INSERT INTO bazar_saved_shops (id, user_handle, shop_id) VALUES (?, ?, ?)')
+        .bind(`save_shop_${Date.now()}`, cleanUser, shopId)
         .run();
       return c.json({ success: true, isSaved: true, message: 'Shop saved' });
     }
@@ -1030,7 +1078,7 @@ bazarApp.post('/shops/:id/save', authMiddleware, async (c) => {
 });
 
 // 11. Mark Listing / Product as Sold
-bazarApp.post('/listings/:id/sold', authMiddleware, async (c) => {
+async function handleSoldListing(c: any) {
   const user = c.get('user');
   const listingId = c.req.param('id');
   const body = await c.req.json().catch(() => ({}));
@@ -1039,7 +1087,7 @@ bazarApp.post('/listings/:id/sold', authMiddleware, async (c) => {
 
   const isActive = isSold ? 0 : 1;
   const res = await db.prepare(
-    'UPDATE bazar_listings SET is_active = ? WHERE id = ? AND (seller_handle = ? OR seller_handle = ?)'
+    'UPDATE bazar_listings SET is_active = ? WHERE id = ? AND (LOWER(seller_handle) = LOWER(?) OR LOWER(seller_handle) = LOWER(?))'
   )
     .bind(isActive, listingId, user.userHandle, `@${user.userHandle}`)
     .run();
@@ -1059,10 +1107,10 @@ bazarApp.post('/listings/:id/sold', authMiddleware, async (c) => {
     isSold,
     message: isSold ? 'Product marked as Sold (Out of stock)' : 'Product marked as Active (In stock)',
   });
-});
-bazarApp.post('/products/:id/sold', authMiddleware, async (c) => {
-  return bazarApp.fetch(c.req.raw, c.env, c.executionCtx);
-});
+}
+
+bazarApp.post('/listings/:id/sold', authMiddleware, handleSoldListing);
+bazarApp.post('/products/:id/sold', authMiddleware, handleSoldListing);
 
 export { bazarApp };
 
