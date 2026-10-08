@@ -8,24 +8,41 @@ function initFirebaseAdmin(): boolean {
     return true;
   }
 
-  const credsJson = process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON;
-  if (!credsJson) {
-    console.warn('[FCM] No GOOGLE_APPLICATION_CREDENTIALS_JSON found in environment.');
-    return false;
+  const rawJson = process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON;
+  if (rawJson) {
+    try {
+      const cleanJson = rawJson.trim().replace(/^'([\s\S]*)'$/, '$1');
+      const serviceAccount = JSON.parse(cleanJson);
+      initializeApp({
+        credential: cert(serviceAccount),
+      });
+      isFirebaseInitialized = true;
+      console.log(`[FCM] Firebase Admin successfully initialized for project: ${serviceAccount.project_id}`);
+      return true;
+    } catch (err) {
+      console.error('[FCM] Failed to initialize Firebase Admin SDK from JSON:', err);
+    }
   }
 
-  try {
-    const serviceAccount = JSON.parse(credsJson);
-    initializeApp({
-      credential: cert(serviceAccount),
-    });
-    isFirebaseInitialized = true;
-    console.log(`[FCM] Firebase Admin successfully initialized for project: ${serviceAccount.project_id}`);
-    return true;
-  } catch (err) {
-    console.error('[FCM] Failed to initialize Firebase Admin SDK:', err);
-    return false;
+  if (process.env.FIREBASE_PROJECT_ID && process.env.FIREBASE_CLIENT_EMAIL && process.env.FIREBASE_PRIVATE_KEY) {
+    try {
+      initializeApp({
+        credential: cert({
+          projectId: process.env.FIREBASE_PROJECT_ID,
+          clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+          privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+        }),
+      });
+      isFirebaseInitialized = true;
+      console.log(`[FCM] Firebase Admin successfully initialized for project: ${process.env.FIREBASE_PROJECT_ID}`);
+      return true;
+    } catch (err) {
+      console.error('[FCM] Failed to initialize Firebase Admin SDK from env vars:', err);
+    }
   }
+
+  console.warn('[FCM] No valid Firebase credentials found in environment.');
+  return false;
 }
 
 export interface PushNotificationPayload {

@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { Env, Variables } from '../../types';
 import { authMiddleware } from '../../middleware/auth';
 import { getDatabase } from '../../db/db_context';
+import { sendPushNotification } from '../../services/fcm_service';
 
 const notificationsApp = new Hono<{ Bindings: Env; Variables: Variables }>();
 
@@ -71,6 +72,18 @@ notificationsApp.post('/', async (c) => {
   }
 
   const db = getDatabase(c);
+
+  if ((type === 'post_comment' || type === 'post_like') && payloadData.postId) {
+    const recent = await db.prepare(
+      `SELECT id FROM notifications 
+       WHERE target_handle = ? AND sender_handle = ? AND type = ? 
+       AND created_at >= datetime('now', '-10 seconds') LIMIT 1`
+    ).bind(targetHandle, senderHandle, type).first() as any;
+    if (recent) {
+      return c.json({ success: true, notificationId: recent.id, message: 'Already notified' });
+    }
+  }
+
   const notifId = `notif_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`;
 
   await db.prepare(
@@ -87,6 +100,15 @@ notificationsApp.post('/', async (c) => {
       JSON.stringify(payloadData)
     )
     .run();
+
+  sendPushNotification({
+    targetHandle,
+    title,
+    body: notifBody,
+    data: payloadData,
+    channelId: 'nearhood_channel',
+    db,
+  }).catch(() => {});
 
   return c.json({
     success: true,

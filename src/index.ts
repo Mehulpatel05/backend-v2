@@ -72,8 +72,9 @@ const handleFcmToken = async (c: any) => {
   const db = getDatabase(c);
 
   try {
-    await db.prepare('UPDATE profiles SET fcm_token = ?, updated_at = CURRENT_TIMESTAMP WHERE handle = ? OR handle = ?')
-      .bind(fcmToken, user.userHandle, `@${user.userHandle}`)
+    const clean = (user.userHandle || '').replace(/^@+/, '').trim().toLowerCase();
+    await db.prepare('UPDATE profiles SET fcm_token = ?, updated_at = CURRENT_TIMESTAMP WHERE LOWER(handle) = ? OR LOWER(handle) = ?')
+      .bind(fcmToken, clean, `@${clean}`)
       .run();
   } catch (_) {}
 

@@ -590,25 +590,52 @@ async function handleAddComment(c: any) {
   let dailyCapReached = false;
   let newBalance: number | undefined;
 
-  if (content.length >= 10) {
-    try {
-      const post = await db.prepare('SELECT author_handle FROM feed_posts WHERE id = ?').bind(postId).first() as any;
-      const cleanAuthor = (post?.author_handle || '').replace(/^@+/, '').trim();
-      const cleanUser = (user.userHandle || '').replace(/^@+/, '').trim();
+  const cleanAuthor = (post?.author_handle || '').replace(/^@+/, '').trim().toLowerCase();
+  const cleanUser = (user.userHandle || '').replace(/^@+/, '').trim().toLowerCase();
 
-      if (cleanAuthor !== cleanUser) {
-        const rewardResult = await awardPoints(db, {
-          userHandle: cleanUser,
-          delta: 3,
-          reason: 'Replied to a neighbour’s post',
-          refType: 'reply',
-          refId: commentId,
-          isAction: true,
-        });
-        pointsAwarded = rewardResult.awardedDelta;
-        dailyCapReached = rewardResult.capReached ?? false;
-        newBalance = rewardResult.newBalance;
-      }
+  // Notify post author about the comment (in-app notification + FCM push)
+  if (cleanAuthor && cleanAuthor !== cleanUser) {
+    try {
+      const notifId = `notif_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`;
+      const snippet = content.length > 50 ? content.slice(0, 47) + '...' : content;
+      const notifTitle = 'Nearhood';
+      const notifBody = `@${cleanUser} commented: "${snippet}"`;
+      const payload = {
+        type: 'post_comment',
+        postId: postId || '',
+        commentId,
+        senderHandle: cleanUser,
+        commenterHandle: cleanUser,
+      };
+      await db.prepare(
+        `INSERT INTO notifications (id, target_handle, sender_handle, type, title, body, payload_json, is_read, created_at)
+         VALUES (?, ?, ?, 'post_comment', ?, ?, ?, 0, CURRENT_TIMESTAMP)`
+      ).bind(notifId, cleanAuthor, cleanUser, notifTitle, notifBody, JSON.stringify(payload)).run();
+
+      sendPushNotification({
+        targetHandle: cleanAuthor,
+        title: notifTitle,
+        body: notifBody,
+        data: payload,
+        channelId: 'nearhood_channel',
+        db,
+      }).catch(() => {});
+    } catch (_) {}
+  }
+
+  if (content.length >= 10 && cleanAuthor !== cleanUser) {
+    try {
+      const rewardResult = await awardPoints(db, {
+        userHandle: cleanUser,
+        delta: 3,
+        reason: 'Replied to a neighbour’s post',
+        refType: 'reply',
+        refId: commentId,
+        isAction: true,
+      });
+      pointsAwarded = rewardResult.awardedDelta;
+      dailyCapReached = rewardResult.capReached ?? false;
+      newBalance = rewardResult.newBalance;
     } catch (_) {}
   }
 
