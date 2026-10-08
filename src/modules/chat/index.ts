@@ -149,22 +149,42 @@ chatApp.get('/:chatId/messages', authMiddleware, async (c) => {
 
   const { results } = await db.prepare(query).bind(...params).all();
 
-  const formatted = (results || []).map((row: any) => ({
-    id: row.id,
-    messageId: row.id,
-    chatId: row.chat_id,
-    senderHandle: (row.sender_handle || '').replace(/^@+/, '').trim(),
-    receiverHandle: (row.receiver_handle || '').replace(/^@+/, '').trim(),
-    content: row.content || '',
-    mediaR2Path: row.media_r2_path || '',
-    imageUrl: row.media_r2_path || '',
-    mediaUrls: row.media_r2_path ? [row.media_r2_path] : [],
-    type: row.message_type || 'text',
-    messageType: row.message_type || 'text',
-    isRead: row.is_read === 1,
-    createdAt: row.created_at,
-    timestamp: row.created_at,
-  }));
+  const formatted = (results || []).map((row: any) => {
+    let mediaUrls: string[] = [];
+    if (row.media_urls_json) {
+      try {
+        const parsed = typeof row.media_urls_json === 'string'
+          ? JSON.parse(row.media_urls_json)
+          : row.media_urls_json;
+        if (Array.isArray(parsed)) {
+          mediaUrls = parsed.filter((u: any) => typeof u === 'string' && u.trim().length > 0);
+        }
+      } catch (_) {}
+    }
+    if (mediaUrls.length === 0 && row.media_r2_path) {
+      mediaUrls = [row.media_r2_path];
+    }
+    const mediaR2Path = row.media_r2_path || (mediaUrls.length > 0 ? mediaUrls[0] : '');
+    const resolvedType = row.message_type || (mediaUrls.length > 1 ? 'image_group' : (mediaR2Path ? 'image' : 'text'));
+
+    return {
+      id: row.id,
+      messageId: row.id,
+      chatId: row.chat_id,
+      senderHandle: (row.sender_handle || '').replace(/^@+/, '').trim(),
+      receiverHandle: (row.receiver_handle || '').replace(/^@+/, '').trim(),
+      content: row.content || '',
+      mediaR2Path: mediaR2Path,
+      imageUrl: mediaR2Path,
+      mediaUrls: mediaUrls,
+      media_urls_json: row.media_urls_json || JSON.stringify(mediaUrls),
+      type: resolvedType,
+      messageType: resolvedType,
+      isRead: row.is_read === 1,
+      createdAt: row.created_at,
+      timestamp: row.created_at,
+    };
+  });
 
   return c.json({
     success: true,
@@ -181,8 +201,19 @@ async function handleSendMessage(c: any) {
   const rawReceiver = body.receiver || body.receiverHandle || body.partnerHandle || body.targetHandle || '';
   const receiver = rawReceiver.replace(/^@+/, '').trim().toLowerCase();
   const content = (body.content || body.text || body.message || '').trim();
-  const mediaR2Path = body.mediaR2Path || body.imageUrl || (Array.isArray(body.mediaUrls) && body.mediaUrls.length > 0 ? body.mediaUrls[0] : '');
-  const messageType = body.messageType || body.type || (mediaR2Path ? 'image' : 'text');
+
+  const rawMediaUrls: string[] = Array.isArray(body.mediaUrls)
+    ? body.mediaUrls.filter((u: any) => typeof u === 'string' && u.trim().length > 0)
+    : [];
+  let mediaR2Path = body.mediaR2Path || body.imageUrl || (rawMediaUrls.length > 0 ? rawMediaUrls[0] : '');
+  if (mediaR2Path && !rawMediaUrls.includes(mediaR2Path)) {
+    rawMediaUrls.unshift(mediaR2Path);
+  }
+  if (!mediaR2Path && rawMediaUrls.length > 0) {
+    mediaR2Path = rawMediaUrls[0];
+  }
+  const mediaUrlsJson = JSON.stringify(rawMediaUrls);
+  const messageType = body.messageType || body.type || (rawMediaUrls.length > 1 ? 'image_group' : (mediaR2Path ? 'image' : 'text'));
 
   if (!receiver) {
     return c.json({ success: false, error: 'Receiver handle is required' }, 400);
@@ -192,7 +223,7 @@ async function handleSendMessage(c: any) {
     return c.json({ success: false, error: 'Cannot send message to yourself' }, 400);
   }
 
-  if (!content && !mediaR2Path) {
+  if (!content && !mediaR2Path && rawMediaUrls.length === 0) {
     return c.json({ success: false, error: 'Message content cannot be empty' }, 400);
   }
 
@@ -220,14 +251,18 @@ async function handleSendMessage(c: any) {
   const user2 = sorted[1];
   const isSenderUser1 = myHandle === user1;
 
-  const previewText = content || (messageType === 'image' ? '📷 Photo' : (messageType === 'voice_note' ? '🎤 Voice note' : 'Message'));
+  const previewText = content || (
+    messageType === 'image_group' || rawMediaUrls.length > 1
+      ? `📷 ${rawMediaUrls.length} photos`
+      : (messageType === 'image' || mediaR2Path ? '📷 Photo' : (messageType === 'voice_note' ? '🎤 Voice note' : 'Message'))
+  );
 
   // 1. Insert chat message first
   await db.prepare(
     `INSERT INTO chat_messages (
       id, chat_id, sender_handle, receiver_handle,
-      content, media_r2_path, message_type, is_read, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP)`
+      content, media_r2_path, media_urls_json, message_type, is_read, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP)`
   ).bind(
     msgId,
     canonicalId,
@@ -235,6 +270,7 @@ async function handleSendMessage(c: any) {
     receiver,
     content,
     mediaR2Path,
+    mediaUrlsJson,
     messageType
   ).run();
 
@@ -316,6 +352,10 @@ async function handleSendMessage(c: any) {
     messageId: msgId,
     chatId: canonicalId,
     timestamp: now,
+    mediaUrls: rawMediaUrls,
+    mediaR2Path: mediaR2Path,
+    imageUrl: mediaR2Path,
+    messageType: messageType,
     message: 'Message sent successfully',
   });
 }

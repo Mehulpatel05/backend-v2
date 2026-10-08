@@ -261,6 +261,7 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     is_read INTEGER DEFAULT 0,
     deleted_by_sender INTEGER DEFAULT 0,
     deleted_by_receiver INTEGER DEFAULT 0,
+    media_urls_json TEXT DEFAULT '[]',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(chat_id) REFERENCES chats(id) ON DELETE CASCADE
 );
