@@ -144,4 +144,44 @@ notificationsApp.post('/read-all', async (c) => {
   return c.json({ success: true, message: 'All notifications marked as read' });
 });
 
+// 5. Delete a Notification for authenticated user
+notificationsApp.delete('/:id', async (c) => {
+  const user = c.get('user');
+  const myHandle = user.userHandle.replace(/^@+/, '').trim().toLowerCase();
+  const id = c.req.param('id');
+  const db = getDatabase(c);
+
+  await db.prepare('DELETE FROM notifications WHERE id = ? AND LOWER(target_handle) = ?')
+    .bind(id, myHandle)
+    .run();
+
+  return c.json({ success: true, message: 'Notification deleted' });
+});
+
+// 6. Clear All Notifications for authenticated user
+notificationsApp.delete('/', async (c) => {
+  const user = c.get('user');
+  const myHandle = user.userHandle.replace(/^@+/, '').trim().toLowerCase();
+  const db = getDatabase(c);
+
+  await db.prepare('DELETE FROM notifications WHERE LOWER(target_handle) = ?')
+    .bind(myHandle)
+    .run();
+
+  return c.json({ success: true, message: 'All notifications cleared' });
+});
+
+// 7. Clear Read Notifications for authenticated user
+notificationsApp.delete('/clear-read', async (c) => {
+  const user = c.get('user');
+  const myHandle = user.userHandle.replace(/^@+/, '').trim().toLowerCase();
+  const db = getDatabase(c);
+
+  await db.prepare('DELETE FROM notifications WHERE LOWER(target_handle) = ? AND is_read = 1')
+    .bind(myHandle)
+    .run();
+
+  return c.json({ success: true, message: 'Read notifications cleared' });
+});
+
 export { notificationsApp };
