@@ -42,7 +42,7 @@ friendsApp.get('/', authMiddleware, async (c) => {
      ORDER BY f.created_at DESC`
   )
     .bind(
-      myHandle, myHandle, myHandle, myHandle, myHandle
+      myHandle, myHandle, myHandle, myHandle, myHandle, myHandle
     )
     .all();
 
