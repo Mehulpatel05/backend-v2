@@ -130,7 +130,7 @@ actionsApp.get('/counters', async (c) => {
       const dev = (await db.prepare('SELECT user_handle FROM devices WHERE token_hash = ? AND revoked_at IS NULL LIMIT 1').bind(tokenHash).first()) as any;
       if (dev?.user_handle) {
         const h = dev.user_handle.replace(/^@+/, '').trim().toLowerCase();
-        const notifRow = (await db.prepare('SELECT COUNT(*) as cnt FROM notifications WHERE (LOWER(target_handle) = ? OR LOWER(target_handle) = ?) AND is_read = 0').bind(h, `@${h}`).first()) as any;
+        const notifRow = (await db.prepare('SELECT COUNT(*) as cnt FROM notifications WHERE (LOWER(target_handle) = ? OR LOWER(target_handle) = ?) AND is_read = 0 AND type NOT IN (\'chat\', \'message\', \'call\')').bind(h, `@${h}`).first()) as any;
         unreadNotifications = notifRow?.cnt || 0;
 
         const chatRow = (await db.prepare('SELECT SUM(CASE WHEN LOWER(user1_handle) = ? THEN unread_count_user1 ELSE unread_count_user2 END) as cnt FROM chats WHERE LOWER(user1_handle) = ? OR LOWER(user2_handle) = ?').bind(h, h, h).first()) as any;

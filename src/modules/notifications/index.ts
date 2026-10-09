@@ -18,10 +18,10 @@ notificationsApp.get('/', async (c) => {
 
   const { results } = await db.prepare(
     `SELECT * FROM notifications 
-     WHERE LOWER(target_handle) = ? 
+     WHERE (LOWER(target_handle) = ? OR LOWER(target_handle) = ?)
      ORDER BY created_at DESC LIMIT ?`
   )
-    .bind(targetHandle, limit)
+    .bind(targetHandle, `@${targetHandle}`, limit)
     .all();
 
   const formatted = (results || []).map((row: any) => {
@@ -124,8 +124,8 @@ notificationsApp.post('/:id/read', async (c) => {
   const id = c.req.param('id');
   const db = getDatabase(c);
 
-  await db.prepare('UPDATE notifications SET is_read = 1 WHERE id = ? AND LOWER(target_handle) = ?')
-    .bind(id, myHandle)
+  await db.prepare('UPDATE notifications SET is_read = 1 WHERE id = ? AND (LOWER(target_handle) = ? OR LOWER(target_handle) = ?)')
+    .bind(id, myHandle, `@${myHandle}`)
     .run();
 
   return c.json({ success: true, message: 'Notification marked as read' });
@@ -137,8 +137,8 @@ notificationsApp.post('/read-all', async (c) => {
   const myHandle = user.userHandle.replace(/^@+/, '').trim().toLowerCase();
   const db = getDatabase(c);
 
-  await db.prepare('UPDATE notifications SET is_read = 1 WHERE LOWER(target_handle) = ?')
-    .bind(myHandle)
+  await db.prepare('UPDATE notifications SET is_read = 1 WHERE (LOWER(target_handle) = ? OR LOWER(target_handle) = ?)')
+    .bind(myHandle, `@${myHandle}`)
     .run();
 
   return c.json({ success: true, message: 'All notifications marked as read' });

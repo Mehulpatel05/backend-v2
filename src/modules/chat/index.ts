@@ -398,7 +398,9 @@ chatApp.post('/:chatId/read', authMiddleware, async (c) => {
     return c.json({ success: false, error: 'Forbidden: You are not a participant in this conversation' }, 403);
   }
 
-  await db.batch([
+  const partnerHandle = parts.length === 2 ? (parts[0] === myHandle ? parts[1] : parts[0]) : '';
+
+  const batchQueries: any[] = [
     db.prepare(
       'UPDATE chat_messages SET is_read = 1 WHERE LOWER(chat_id) = ? AND LOWER(receiver_handle) = ?'
     ).bind(chatId, myHandle),
@@ -408,7 +410,20 @@ chatApp.post('/:chatId/read', authMiddleware, async (c) => {
        unread_count_user2 = CASE WHEN LOWER(user2_handle) = ? THEN 0 ELSE unread_count_user2 END
        WHERE LOWER(canonical_id) = ? OR LOWER(id) = ?`
     ).bind(myHandle, myHandle, chatId, chatId),
-  ]);
+  ];
+
+  if (partnerHandle) {
+    batchQueries.push(
+      db.prepare(
+        `UPDATE notifications SET is_read = 1
+         WHERE (LOWER(target_handle) = ? OR LOWER(target_handle) = ?)
+           AND type = 'chat'
+           AND (LOWER(sender_handle) = ? OR LOWER(sender_handle) = ?)`
+      ).bind(myHandle, `@${myHandle}`, partnerHandle, `@${partnerHandle}`)
+    );
+  }
+
+  await db.batch(batchQueries);
 
   return c.json({ success: true, message: 'Chat marked as read' });
 });
