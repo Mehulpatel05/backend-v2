@@ -104,7 +104,6 @@ export async function sendPushNotification({
           channelId: channelId || 'nearhood_channel',
           sound: 'default',
           priority: 'max',
-          clickAction: 'FLUTTER_NOTIFICATION_CLICK',
         },
       },
     };

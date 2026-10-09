@@ -136,6 +136,9 @@ export async function checkAndAwardBadges(db: any, userHandle: string): Promise<
     .bind(clean, `@${clean}`).first() as any;
   if (isFounder) {
     await awardBadgeIfNew(db, clean, 'founding_neighbour');
+  } else {
+    await db.prepare("DELETE FROM user_badges WHERE (LOWER(user_handle) = ? OR LOWER(user_handle) = ?) AND badge_key = 'founding_neighbour'")
+      .bind(clean, `@${clean}`).run();
   }
 }
 
@@ -274,11 +277,25 @@ rewardsApp.get('/badges', authMiddleware, async (c) => {
   const clean = (user.userHandle || '').replace(/^@+/, '').trim();
   const db = getDatabase(c);
 
-  const earnedRows = await db.prepare('SELECT badge_key, earned_at FROM user_badges WHERE user_handle = ?')
-    .bind(clean).all() as any;
+  const earnedRows = await db.prepare(
+    'SELECT badge_key, earned_at FROM user_badges WHERE LOWER(user_handle) = ? OR LOWER(user_handle) = ?'
+  ).bind(clean, `@${clean}`).all() as any;
   const earnedMap = new Map();
   for (const b of earnedRows.results || []) {
     earnedMap.set(b.badge_key, b.earned_at);
+  }
+
+  const founderRow = await db.prepare(
+    'SELECT 1 FROM area_founders WHERE LOWER(user_id) = ? OR LOWER(user_id) = ?'
+  ).bind(clean, `@${clean}`).first() as any;
+
+  if (!founderRow && earnedMap.has('founding_neighbour')) {
+    earnedMap.delete('founding_neighbour');
+    await db.prepare(
+      "DELETE FROM user_badges WHERE (LOWER(user_handle) = ? OR LOWER(user_handle) = ?) AND badge_key = 'founding_neighbour'"
+    ).bind(clean, `@${clean}`).run();
+  } else if (founderRow && !earnedMap.has('founding_neighbour')) {
+    earnedMap.set('founding_neighbour', new Date().toISOString());
   }
 
   const helpfulCountRow = await db.prepare('SELECT COUNT(*) as count FROM helpful_votes WHERE author_handle = ?')
