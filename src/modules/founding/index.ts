@@ -63,11 +63,13 @@ foundingApp.get('/counts', async (c) => {
     for (const row of results || []) {
       if (row.area_id) {
         counts[row.area_id] = Number(row.cnt) || 0;
-        if (row.area_id.startsWith('GJ-VAD')) {
-          counts['GJ-VAD'] = (counts['GJ-VAD'] || 0) + Number(row.cnt);
-        }
       }
     }
+
+    const vadodaraRow = (await db.prepare(
+      "SELECT COUNT(*) as cnt FROM area_founders WHERE area_id = 'GJ-VAD' OR area_id LIKE 'GJ-VAD%'"
+    ).first()) as any;
+    counts['GJ-VAD'] = Number(vadodaraRow?.cnt) || 0;
 
     return c.json({ success: true, counts });
   } catch (e: any) {
@@ -364,6 +366,10 @@ adminFoundingApp.get('/areas/:area_id/requests', async (c) => {
   const cityId = isCity ? areaParam : 'GJ-VAD';
 
   try {
+    const orderClause = status === 'rejected'
+      ? 'ORDER BY COALESCE(fr.reviewed_at, fr.created_at) DESC'
+      : 'ORDER BY fr.created_at ASC';
+
     const query = isAll
       ? `SELECT 
           fr.id,
@@ -379,7 +385,7 @@ adminFoundingApp.get('/areas/:area_id/requests', async (c) => {
         FROM founding_requests fr
         LEFT JOIN profiles p ON (LOWER(p.handle) = LOWER(fr.user_id) OR LOWER(p.handle) = '@' || LOWER(fr.user_id))
         WHERE fr.status = ?
-        ORDER BY fr.created_at ASC`
+        ${orderClause}`
       : `SELECT 
           fr.id,
           fr.user_id,
@@ -394,7 +400,7 @@ adminFoundingApp.get('/areas/:area_id/requests', async (c) => {
         FROM founding_requests fr
         LEFT JOIN profiles p ON (LOWER(p.handle) = LOWER(fr.user_id) OR LOWER(p.handle) = '@' || LOWER(fr.user_id))
         WHERE fr.area_id = ? AND fr.status = ?
-        ORDER BY fr.created_at ASC`;
+        ${orderClause}`;
 
     const { results } = isAll
       ? await db.prepare(query).bind(status).all()
@@ -512,11 +518,11 @@ adminFoundingApp.post('/requests/:id/approve', async (c) => {
 
   try {
     const reqRow = (await db.prepare(
-      "SELECT * FROM founding_requests WHERE id = ? AND status = 'pending'"
+      "SELECT * FROM founding_requests WHERE id = ? AND status IN ('pending', 'rejected')"
     ).bind(requestId).first()) as any;
 
     if (!reqRow) {
-      return c.json({ success: false, error: 'Pending request not found' }, 404);
+      return c.json({ success: false, error: 'Request not found' }, 404);
     }
 
     const cityId = reqRow.city_id || 'GJ-VAD';
