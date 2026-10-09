@@ -263,11 +263,22 @@ async function handleSendMessage(c: any) {
   const user2 = sorted[1];
   const isSenderUser1 = myHandle === user1;
 
-  const previewText = content || (
-    messageType === 'image_group' || rawMediaUrls.length > 1
-      ? `📷 ${rawMediaUrls.length} photos`
-      : (messageType === 'image' || mediaR2Path ? '📷 Photo' : (messageType === 'voice_note' ? '🎤 Voice note' : 'Message'))
-  );
+  let previewText = (content || '').trim();
+  if (!previewText) {
+    if (messageType === 'image_group' || rawMediaUrls.length > 1) {
+      previewText = `📷 ${rawMediaUrls.length} photos`;
+    } else if (messageType === 'image' || mediaR2Path) {
+      previewText = '📷 Photo';
+    } else if (messageType === 'voice_note') {
+      previewText = '🎤 Voice note';
+    } else if (messageType === 'video') {
+      previewText = '🎥 Video';
+    } else if (messageType === 'audio') {
+      previewText = '🎵 Audio';
+    } else {
+      previewText = 'Sent you a message';
+    }
+  }
 
   // 1. Insert chat message first
   await db.prepare(
@@ -326,7 +337,10 @@ async function handleSendMessage(c: any) {
       senderDisplayName = (senderProfile?.display_name || '').trim();
     } catch (_) {}
 
-    const notifTitle = senderDisplayName ? `${senderDisplayName} (@${myHandle})` : `@${myHandle}`;
+    const cleanMyHandle = myHandle.replace(/^@+/, '').trim();
+    const notifTitle = (senderDisplayName && senderDisplayName.toLowerCase() !== cleanMyHandle.toLowerCase())
+      ? `${senderDisplayName} (@${cleanMyHandle})`
+      : `@${cleanMyHandle}`;
     const payload = {
       type: 'chat',
       partnerHandle: myHandle,

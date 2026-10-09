@@ -62,10 +62,24 @@ notificationsApp.post('/', async (c) => {
   const body = await c.req.json().catch(() => ({}));
   const rawTarget = body.target_handle || body.targetHandle || body.receiver || '';
   const targetHandle = rawTarget.replace(/^@+/, '').trim().toLowerCase();
-  const title = body.title || 'Nearhood';
-  const notifBody = body.body || body.message || '';
+  const title = (body.title || 'Nearhood').trim();
+  let notifBody = (body.body || body.message || '').trim();
   const type = body.type || 'general';
   const payloadData = body.data || body.payload || {};
+
+  if (!notifBody) {
+    if (type === 'chat' || type === 'message') {
+      notifBody = 'Sent you a message';
+    } else if (type === 'friend_request') {
+      notifBody = 'Sent you a friend request';
+    } else if (type === 'post_like') {
+      notifBody = 'Liked your post';
+    } else if (type === 'post_comment') {
+      notifBody = 'Commented on your post';
+    } else {
+      notifBody = 'You have a new update';
+    }
+  }
 
   if (!targetHandle) {
     return c.json({ success: false, error: 'target_handle is required' }, 400);
@@ -73,11 +87,11 @@ notificationsApp.post('/', async (c) => {
 
   const db = getDatabase(c);
 
-  if ((type === 'post_comment' || type === 'post_like') && payloadData.postId) {
+  if (['chat', 'message', 'post_comment', 'post_like', 'friend_request', 'friend_accept'].includes(type)) {
     const recent = await db.prepare(
       `SELECT id FROM notifications 
        WHERE target_handle = ? AND sender_handle = ? AND type = ? 
-       AND created_at >= datetime('now', '-10 seconds') LIMIT 1`
+       AND created_at >= datetime('now', '-5 seconds') LIMIT 1`
     ).bind(targetHandle, senderHandle, type).first() as any;
     if (recent) {
       return c.json({ success: true, notificationId: recent.id, message: 'Already notified' });

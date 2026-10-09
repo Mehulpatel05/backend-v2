@@ -82,20 +82,37 @@ export async function sendPushNotification({
       return false;
     }
 
-    // 2. Format string data payload (FCM data requires string key-value pairs)
+    const effectiveTitle = (title || 'Nearhood').trim();
+    let effectiveBody = (body || '').trim();
+    if (!effectiveBody) {
+      const type = (data?.type || '').toString();
+      if (type === 'chat' || type === 'message') {
+        effectiveBody = 'Sent you a message';
+      } else if (type === 'call') {
+        effectiveBody = 'Incoming call';
+      } else if (type === 'post_like') {
+        effectiveBody = 'Liked your post';
+      } else if (type === 'post_comment') {
+        effectiveBody = 'Commented on your post';
+      } else if (type === 'friend_request') {
+        effectiveBody = 'Sent you a friend request';
+      } else {
+        effectiveBody = 'You have a new notification';
+      }
+    }
+
     const stringData: Record<string, string> = {};
     for (const [key, value] of Object.entries(data)) {
       stringData[key] = typeof value === 'string' ? value : JSON.stringify(value);
     }
-    stringData['title'] = title;
-    stringData['body'] = body;
+    stringData['title'] = effectiveTitle;
+    stringData['body'] = effectiveBody;
 
-    // 3. Dispatch message
     const message: Message = {
       token: fcmToken,
       notification: {
-        title,
-        body,
+        title: effectiveTitle,
+        body: effectiveBody,
       },
       data: stringData,
       android: {
