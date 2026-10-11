@@ -606,6 +606,10 @@ export async function ensureSqliteSchema(): Promise<void> {
         'ALTER TABLE bazar_listings ADD COLUMN reward_credited INTEGER DEFAULT 0',
         'ALTER TABLE friendships ADD COLUMN user1 TEXT NOT NULL DEFAULT ""',
         'ALTER TABLE friendships ADD COLUMN user2 TEXT NOT NULL DEFAULT ""',
+        'ALTER TABLE profiles ADD COLUMN home_city_id TEXT DEFAULT "GJ-VAD"',
+        'ALTER TABLE profiles ADD COLUMN home_area_id TEXT DEFAULT ""',
+        'ALTER TABLE profiles ADD COLUMN home_area_name TEXT DEFAULT ""',
+        'ALTER TABLE profiles ADD COLUMN address_note TEXT DEFAULT ""',
       ];
 
       for (const m of migrations) {

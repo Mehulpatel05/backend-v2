@@ -451,6 +451,18 @@ async function handleClaimHandle(c: any) {
         db.prepare('UPDATE profiles SET display_name = ? WHERE LOWER(handle) = LOWER(?)').bind(newDisplayName, newHandle)
       );
     }
+
+    const homeCityId = body.home_city_id || body.cityId || body.city_id || 'GJ-VAD';
+    const homeAreaId = body.home_area_id || body.areaId || body.area_id || '';
+    const homeAreaName = body.home_area_name || body.areaName || body.area_name || '';
+    const addressNote = body.address_note || body.addressNote || '';
+
+    if (homeAreaId || homeAreaName || addressNote) {
+      cascadeUpdates.push(
+        db.prepare('UPDATE profiles SET home_city_id = ?, home_area_id = ?, home_area_name = ?, address_note = ? WHERE LOWER(handle) = LOWER(?)')
+          .bind(homeCityId, homeAreaId, homeAreaName, addressNote, newHandle)
+      );
+    }
     await Promise.allSettled(cascadeUpdates.map((s) => s.run()));
 
     const optionalTables = [
