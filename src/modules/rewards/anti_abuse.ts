@@ -89,18 +89,25 @@ export async function checkDuplicateContent(
   db: any,
   userHandle: string,
   text: string,
-  type: 'post' | 'reply'
+  type: 'post' | 'reply',
+  excludeId?: string
 ): Promise<{ isDuplicate: boolean; error?: string }> {
   const cleanHandle = userHandle.replace(/^@+/, '').trim();
   const tableName = type === 'post' ? 'feed_posts' : 'feed_comments';
 
-  const rows = await db.prepare(`
-    SELECT content FROM ${tableName}
+  let query = `
+    SELECT id, content FROM ${tableName}
     WHERE (LOWER(author_handle) = LOWER(?) OR LOWER(author_handle) = LOWER(?))
       AND created_at >= datetime('now', '-7 days')
-    ORDER BY created_at DESC
-    LIMIT 100
-  `).bind(cleanHandle, `@${cleanHandle}`).all() as any;
+  `;
+  const params: any[] = [cleanHandle, `@${cleanHandle}`];
+  if (excludeId) {
+    query += ' AND id != ?';
+    params.push(excludeId);
+  }
+  query += ' ORDER BY created_at DESC LIMIT 100';
+
+  const rows = await db.prepare(query).bind(...params).all() as any;
 
   const newNormalized = normalizeContentText(text);
 

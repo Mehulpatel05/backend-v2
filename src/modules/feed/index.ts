@@ -272,7 +272,7 @@ async function handleCreatePost(c: any) {
     if (!quality.valid) {
       limitReason = quality.error;
     } else {
-      const duplicateCheck = await checkDuplicateContent(db, cleanHandle, content, 'post');
+      const duplicateCheck = await checkDuplicateContent(db, cleanHandle, content, 'post', postId);
       if (duplicateCheck.isDuplicate) {
         limitReason = duplicateCheck.error;
       } else {
@@ -677,7 +677,7 @@ async function handleAddComment(c: any) {
     if (!quality.valid) {
       limitReason = quality.error;
     } else {
-      const duplicateCheck = await checkDuplicateContent(db, cleanUser, content, 'reply');
+      const duplicateCheck = await checkDuplicateContent(db, cleanUser, content, 'reply', commentId);
       if (duplicateCheck.isDuplicate) {
         limitReason = duplicateCheck.error;
       } else {
