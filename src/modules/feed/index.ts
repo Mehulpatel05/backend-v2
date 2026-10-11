@@ -3,7 +3,7 @@ import { Env, Variables } from '../../types';
 import { authMiddleware } from '../../middleware/auth';
 import { getDatabase } from '../../db/db_context';
 import { sendPushNotification } from '../../services/fcm_service';
-import { awardPoints } from '../rewards';
+import { awardPoints, handleReplyLikeOrVote } from '../rewards';
 import {
   validateContentQuality,
   checkDuplicateContent,
@@ -50,8 +50,8 @@ function formatPostRow(row: any, userVote: number = 0) {
     upvotes: row.upvotes ?? row.likes_count ?? 0,
     downvotes: row.downvotes ?? 0,
     likes_count: row.likes_count ?? row.upvotes ?? 0,
-    commentCount: row.comments_count ?? 0,
-    comments_count: row.comments_count ?? 0,
+    commentCount: row.real_comments_count != null ? Number(row.real_comments_count) : (row.comments_count ?? 0),
+    comments_count: row.real_comments_count != null ? Number(row.real_comments_count) : (row.comments_count ?? 0),
     userVote: userVote,
     reportCount: row.report_count ?? 0,
     reporters: reporters,
@@ -113,7 +113,8 @@ async function handleGetPosts(c: any) {
   const includeTest = c.req.query('includeTest') === 'true';
 
   let query = `
-    SELECT p.*, pr.display_name, pr.avatar_r2_path, pr.is_verified, pr.bio, af.seq AS founder_seq
+    SELECT p.*, pr.display_name, pr.avatar_r2_path, pr.is_verified, pr.bio, af.seq AS founder_seq,
+           (SELECT COUNT(*) FROM feed_comments fc WHERE fc.post_id = p.id) AS real_comments_count
     FROM feed_posts p
     LEFT JOIN profiles pr ON (LOWER(p.author_handle) = LOWER(pr.handle) OR LOWER(p.author_handle) = '@' || LOWER(pr.handle) OR '@' || LOWER(p.author_handle) = LOWER(pr.handle))
     LEFT JOIN area_founders af ON (LOWER(af.user_id) = LOWER(p.author_handle) OR LOWER(af.user_id) = LOWER(REPLACE(p.author_handle, '@', '')))
@@ -568,21 +569,21 @@ feedApp.post('/posts/:id/like', authMiddleware, handlePostLike);
 
 // 5. Comments
 async function handleGetComments(c: any) {
-  const postId = c.req.param('id');
+  const postId = c.req.param('id') || c.req.param('postId');
   const userHandle = c.req.query('userHandle') || c.req.query('currentUserHandle') || c.get('user')?.userHandle || '';
-  const cleanVoter = userHandle.replace(/^@+/, '').trim();
+  const cleanVoter = userHandle.replace(/^@+/, '').trim().toLowerCase();
   const db = getDatabase(c);
   const { results } = await db.prepare(
     `SELECT c.*, pr.display_name, pr.avatar_r2_path, pr.is_verified, pr.bio, af.seq AS founder_seq,
      (SELECT COUNT(*) FROM helpful_votes hv WHERE hv.reply_id = c.id) AS helpful_votes,
-     (SELECT COUNT(*) FROM helpful_votes hv WHERE hv.reply_id = c.id AND (LOWER(hv.voter_handle) = LOWER(?) OR LOWER(hv.voter_handle) = '@' || LOWER(?) OR '@' || LOWER(hv.voter_handle) = LOWER(?))) AS is_helpful_voted
+     (SELECT COUNT(*) FROM helpful_votes hv WHERE hv.reply_id = c.id AND (LOWER(hv.voter_handle) = ? OR LOWER(hv.voter_handle) = ?)) AS is_helpful_voted
      FROM feed_comments c
      LEFT JOIN profiles pr ON (LOWER(c.author_handle) = LOWER(pr.handle) OR LOWER(c.author_handle) = '@' || LOWER(pr.handle) OR '@' || LOWER(c.author_handle) = LOWER(pr.handle))
      LEFT JOIN area_founders af ON (LOWER(af.user_id) = LOWER(c.author_handle) OR LOWER(af.user_id) = LOWER(REPLACE(c.author_handle, '@', '')))
      WHERE c.post_id = ?
      ORDER BY c.created_at ASC`
   )
-    .bind(cleanVoter, cleanVoter, cleanVoter, postId)
+    .bind(cleanVoter, `@${cleanVoter}`, postId)
     .all();
 
   const formatted = (results || []).map((row: any) => {
@@ -591,7 +592,7 @@ async function handleGetComments(c: any) {
     const isVerified = isFounder || isVerifiedCitizen;
     const authorBadge = isFounder ? `FOUNDING #${row.founder_seq}` : (isVerifiedCitizen ? 'VERIFIED' : null);
     const cleanAuthor = (row.author_handle || '').replace(/^@+/, '').trim();
-    const isHelpful = (row.is_helpful_voted ?? 0) > 0;
+    const isHelpful = cleanVoter.length > 0 && (row.is_helpful_voted ?? 0) > 0;
     const helpfulCount = row.helpful_votes ?? 0;
     return {
       ...row,
@@ -608,6 +609,8 @@ async function handleGetComments(c: any) {
       like_count: helpfulCount,
       isLiked: isHelpful,
       is_liked: isHelpful,
+      liked_by_me: isHelpful,
+      likedByMe: isHelpful,
       helpfulVotes: helpfulCount,
       helpful_votes: helpfulCount,
       isHelpfulVoted: isHelpful,
@@ -620,11 +623,15 @@ async function handleGetComments(c: any) {
   return c.json({
     success: true,
     comments: formatted,
+    count: formatted.length,
   });
 }
 
 feedApp.get('/:id/comments', handleGetComments);
 feedApp.get('/posts/:id/comments', handleGetComments);
+feedApp.post('/comments/:id/like', authMiddleware, handleReplyLikeOrVote);
+feedApp.post('/posts/:postId/comments/:id/like', authMiddleware, handleReplyLikeOrVote);
+feedApp.post('/:postId/comments/:id/like', authMiddleware, handleReplyLikeOrVote);
 
 async function handleAddComment(c: any) {
   const user = c.get('user');
@@ -660,7 +667,7 @@ async function handleAddComment(c: any) {
       user.userHandle,
       content
     ),
-    db.prepare('UPDATE feed_posts SET comments_count = comments_count + 1 WHERE id = ?').bind(postId),
+    db.prepare('UPDATE feed_posts SET comments_count = (SELECT COUNT(*) FROM feed_comments WHERE post_id = ?) WHERE id = ?').bind(postId, postId),
   ]);
 
   const cleanAuthor = (post?.author_handle || '').replace(/^@+/, '').trim().toLowerCase();
@@ -966,8 +973,8 @@ async function handleDeleteComment(c: any) {
 
   await db.prepare('DELETE FROM feed_comments WHERE id = ?').bind(commentId).run();
   if (comment.post_id) {
-    await db.prepare('UPDATE feed_posts SET comments_count = MAX(0, comments_count - 1) WHERE id = ?')
-      .bind(comment.post_id).run();
+    await db.prepare('UPDATE feed_posts SET comments_count = (SELECT COUNT(*) FROM feed_comments WHERE post_id = ?) WHERE id = ?')
+      .bind(comment.post_id, comment.post_id).run();
   }
 
   await reversePoints(db, commentId, 'reply');

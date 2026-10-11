@@ -837,10 +837,13 @@ rewardsApp.post('/coupons/unlock', authMiddleware, async (c) => {
   });
 });
 
-async function handleReplyLikeOrVote(c: any) {
+export async function handleReplyLikeOrVote(c: any) {
   const user = c.get('user');
-  const voterHandle = (user.userHandle || '').replace(/^@+/, '').trim();
-  const replyId = c.req.param('id');
+  const voterHandle = (user?.userHandle || '').replace(/^@+/, '').trim().toLowerCase();
+  if (!voterHandle) {
+    return c.json({ success: false, error: 'Unauthorized: Missing user handle' }, 401);
+  }
+  const replyId = c.req.param('id') || c.req.param('commentId');
   const db = getDatabase(c);
 
   const comment = await db.prepare('SELECT author_handle, post_id FROM feed_comments WHERE id = ?')
@@ -850,22 +853,39 @@ async function handleReplyLikeOrVote(c: any) {
     return c.json({ success: false, error: 'Reply not found' }, 404);
   }
 
-  const authorHandle = (comment.author_handle || '').replace(/^@+/, '').trim();
-  if (authorHandle.toLowerCase() === voterHandle.toLowerCase()) {
+  const authorHandle = (comment.author_handle || '').replace(/^@+/, '').trim().toLowerCase();
+  if (authorHandle === voterHandle) {
     return c.json({ success: false, error: 'Cannot like your own comment' }, 400);
   }
 
-  const existingVote = await db.prepare('SELECT id, is_rewarded FROM helpful_votes WHERE reply_id = ? AND voter_handle = ?')
-    .bind(replyId, voterHandle).first() as any;
+  const existingVote = await db.prepare(
+    'SELECT id, is_rewarded FROM helpful_votes WHERE reply_id = ? AND (LOWER(voter_handle) = ? OR LOWER(voter_handle) = ?)'
+  ).bind(replyId, voterHandle, `@${voterHandle}`).first() as any;
 
   if (existingVote) {
-    await db.prepare('DELETE FROM helpful_votes WHERE reply_id = ? AND voter_handle = ?')
-      .bind(replyId, voterHandle).run();
+    await db.prepare(
+      'DELETE FROM helpful_votes WHERE reply_id = ? AND (LOWER(voter_handle) = ? OR LOWER(voter_handle) = ?)'
+    ).bind(replyId, voterHandle, `@${voterHandle}`).run();
 
     if (existingVote.is_rewarded === 1) {
-      await reversePoints(db, `${replyId}_${voterHandle}`, 'vote' as any);
+      await reversePoints(db, `${replyId}_${voterHandle}`, 'vote' as any).catch(() => {});
     }
-    return c.json({ success: true, action: 'unliked', isLiked: false, message: 'Like removed' });
+
+    const countRow = (await db.prepare(
+      'SELECT COUNT(*) as count FROM helpful_votes WHERE reply_id = ?'
+    ).bind(replyId).first()) as any;
+    const currentLikeCount = countRow?.count ?? 0;
+
+    return c.json({
+      success: true,
+      action: 'unliked',
+      isLiked: false,
+      liked_by_me: false,
+      likedByMe: false,
+      likeCount: currentLikeCount,
+      like_count: currentLikeCount,
+      message: 'Like removed',
+    });
   }
 
   const voteCheck = await validateHelpfulVote(db, voterHandle, authorHandle, replyId || '');
@@ -897,11 +917,11 @@ async function handleReplyLikeOrVote(c: any) {
 
   const voteId = `vote_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
   await db.prepare(`
-    INSERT INTO helpful_votes (id, reply_id, voter_handle, author_handle, is_rewarded, created_at)
+    INSERT OR IGNORE INTO helpful_votes (id, reply_id, voter_handle, author_handle, is_rewarded, created_at)
     VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
   `).bind(voteId, replyId, voterHandle, authorHandle, isRewarded).run();
 
-  if (authorHandle && authorHandle.toLowerCase() !== voterHandle.toLowerCase()) {
+  if (authorHandle && authorHandle !== voterHandle) {
     try {
       const notifId = `notif_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
       const payload = {
@@ -912,8 +932,8 @@ async function handleReplyLikeOrVote(c: any) {
         likerHandle: voterHandle,
       };
       await db.prepare(`
-        INSERT INTO notifications (id, recipient_handle, actor_handle, title, body, payload, is_read, created_at)
-        VALUES (?, ?, ?, 'Nearhood', ?, ?, 0, CURRENT_TIMESTAMP)
+        INSERT INTO notifications (id, target_handle, sender_handle, type, title, body, payload_json, is_read, created_at)
+        VALUES (?, ?, ?, 'comment_like', 'Nearhood', ?, ?, 0, CURRENT_TIMESTAMP)
       `).bind(
         notifId,
         authorHandle,
@@ -924,10 +944,19 @@ async function handleReplyLikeOrVote(c: any) {
     } catch (_) {}
   }
 
+  const countRow = (await db.prepare(
+    'SELECT COUNT(*) as count FROM helpful_votes WHERE reply_id = ?'
+  ).bind(replyId).first()) as any;
+  const currentLikeCount = countRow?.count ?? 0;
+
   return c.json({
     success: true,
     action: 'liked',
     isLiked: true,
+    liked_by_me: true,
+    likedByMe: true,
+    likeCount: currentLikeCount,
+    like_count: currentLikeCount,
     pointsAwarded,
     message: `Liked${rewardMessage}`,
   });
@@ -935,6 +964,7 @@ async function handleReplyLikeOrVote(c: any) {
 
 rewardsApp.post('/replies/:id/helpful', authMiddleware, handleReplyLikeOrVote);
 rewardsApp.post('/replies/:id/like', authMiddleware, handleReplyLikeOrVote);
+rewardsApp.post('/comments/:id/like', authMiddleware, handleReplyLikeOrVote);
 
 rewardsApp.post('/bazaar/:id/claim', authMiddleware, async (c) => {
   const user = c.get('user');

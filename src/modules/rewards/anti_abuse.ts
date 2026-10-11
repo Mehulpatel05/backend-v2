@@ -187,7 +187,7 @@ export async function validateHelpfulVote(
   const cleanAuthor = authorHandle.replace(/^@+/, '').trim().toLowerCase();
 
   if (cleanVoter === cleanAuthor) {
-    return { eligible: false, reason: 'No self-likes allowed' };
+    return { eligible: false, reason: 'No self-votes or self-likes allowed' };
   }
 
   const voterUser = await db.prepare(`
@@ -215,7 +215,7 @@ export async function validateHelpfulVote(
   `).bind(cleanVoter, cleanAuthor).first() as any;
 
   if ((todayVotes?.cnt || 0) >= 1) {
-    return { eligible: false, reason: 'Only 1 rewarded like per author per day allowed' };
+    return { eligible: false, reason: 'Max 1 rewarded vote per author per day allowed' };
   }
 
   const weeklyPairVotes = await db.prepare(`
@@ -227,7 +227,7 @@ export async function validateHelpfulVote(
   `).bind(cleanVoter, cleanAuthor, cleanAuthor, cleanVoter).first() as any;
 
   if ((weeklyPairVotes?.cnt || 0) >= 3) {
-    return { eligible: false, reason: 'Maximum 3 rewarded likes between the same pair of users per week' };
+    return { eligible: false, reason: 'Maximum 3 rewarded votes between the same pair of users per week' };
   }
 
   return { eligible: true };
