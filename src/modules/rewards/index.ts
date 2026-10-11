@@ -191,7 +191,7 @@ export async function awardPoints(db: any, params: {
         awardedDelta: 0,
         newBalance: rewards.balance,
         limitReached: true,
-        limitReason: `Daily limit reached: maximum ${DAILY_VOTES_LIMIT} rewarded votes per day`,
+        limitReason: `Daily limit reached: maximum ${DAILY_VOTES_LIMIT} rewarded likes per day`,
       };
     }
     if (action === 'bazaar' && (daily.listings_count || 0) >= DAILY_LISTINGS_LIMIT) {
@@ -470,6 +470,12 @@ rewardsApp.get('/me', authMiddleware, async (c) => {
           points: 5,
           isLimitReached: (daily.votes_count || 0) >= DAILY_VOTES_LIMIT,
         },
+        likes: {
+          current: daily.votes_count || 0,
+          max: DAILY_VOTES_LIMIT,
+          points: 5,
+          isLimitReached: (daily.votes_count || 0) >= DAILY_VOTES_LIMIT,
+        },
         listings: {
           current: daily.listings_count || 0,
           max: DAILY_LISTINGS_LIMIT,
@@ -481,6 +487,9 @@ rewardsApp.get('/me', authMiddleware, async (c) => {
         isCapReached: (daily.daily_points || 0) >= DAILY_POINTS_CAP,
       },
       progress: {
+        likeCount: helpfulVotes,
+        likesReceived: helpfulVotes,
+        highestLikeBadge: highestHelpfulBadge,
         helpfulVotes,
         soldCount,
         nextGoalPoints,
@@ -550,7 +559,7 @@ rewardsApp.get('/badges', authMiddleware, async (c) => {
     {
       key: 'helper',
       name: 'Helper',
-      description: 'Receive 10 helpful votes on your comments and replies.',
+      description: 'Receive 10 likes on your comments and replies.',
       required: 10,
       current: helpfulVotes,
       earned: earnedMap.has('helper'),
@@ -559,7 +568,7 @@ rewardsApp.get('/badges', authMiddleware, async (c) => {
     {
       key: 'local_hero',
       name: 'Local Hero',
-      description: 'Receive 50 helpful votes on your comments and replies.',
+      description: 'Receive 50 likes on your comments and replies.',
       required: 50,
       current: helpfulVotes,
       earned: earnedMap.has('local_hero'),
@@ -828,13 +837,13 @@ rewardsApp.post('/coupons/unlock', authMiddleware, async (c) => {
   });
 });
 
-rewardsApp.post('/replies/:id/helpful', authMiddleware, async (c) => {
+async function handleReplyLikeOrVote(c: any) {
   const user = c.get('user');
   const voterHandle = (user.userHandle || '').replace(/^@+/, '').trim();
   const replyId = c.req.param('id');
   const db = getDatabase(c);
 
-  const comment = await db.prepare('SELECT author_handle FROM feed_comments WHERE id = ?')
+  const comment = await db.prepare('SELECT author_handle, post_id FROM feed_comments WHERE id = ?')
     .bind(replyId).first() as any;
 
   if (!comment) {
@@ -842,8 +851,8 @@ rewardsApp.post('/replies/:id/helpful', authMiddleware, async (c) => {
   }
 
   const authorHandle = (comment.author_handle || '').replace(/^@+/, '').trim();
-  if (authorHandle === voterHandle) {
-    return c.json({ success: false, error: 'Cannot vote on your own reply' }, 400);
+  if (authorHandle.toLowerCase() === voterHandle.toLowerCase()) {
+    return c.json({ success: false, error: 'Cannot like your own comment' }, 400);
   }
 
   const existingVote = await db.prepare('SELECT id, is_rewarded FROM helpful_votes WHERE reply_id = ? AND voter_handle = ?')
@@ -856,7 +865,7 @@ rewardsApp.post('/replies/:id/helpful', authMiddleware, async (c) => {
     if (existingVote.is_rewarded === 1) {
       await reversePoints(db, `${replyId}_${voterHandle}`, 'vote' as any);
     }
-    return c.json({ success: true, action: 'unvoted', message: 'Helpful vote removed' });
+    return c.json({ success: true, action: 'unliked', isLiked: false, message: 'Like removed' });
   }
 
   const voteCheck = await validateHelpfulVote(db, voterHandle, authorHandle, replyId || '');
@@ -869,7 +878,7 @@ rewardsApp.post('/replies/:id/helpful', authMiddleware, async (c) => {
     const awardRes = await awardPoints(db, {
       userHandle: authorHandle,
       delta: 5,
-      reason: 'Reply marked helpful by a neighbour',
+      reason: 'Comment liked by a neighbour',
       action: 'vote',
       sourceId: `${replyId}_${voterHandle}`,
       isAction: true,
@@ -892,13 +901,40 @@ rewardsApp.post('/replies/:id/helpful', authMiddleware, async (c) => {
     VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
   `).bind(voteId, replyId, voterHandle, authorHandle, isRewarded).run();
 
+  if (authorHandle && authorHandle.toLowerCase() !== voterHandle.toLowerCase()) {
+    try {
+      const notifId = `notif_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+      const payload = {
+        type: 'comment_like',
+        commentId: replyId,
+        postId: comment.post_id || '',
+        senderHandle: voterHandle,
+        likerHandle: voterHandle,
+      };
+      await db.prepare(`
+        INSERT INTO notifications (id, recipient_handle, actor_handle, title, body, payload, is_read, created_at)
+        VALUES (?, ?, ?, 'Nearhood', ?, ?, 0, CURRENT_TIMESTAMP)
+      `).bind(
+        notifId,
+        authorHandle,
+        voterHandle,
+        `@${voterHandle} liked your comment ❤️`,
+        JSON.stringify(payload)
+      ).run().catch(() => {});
+    } catch (_) {}
+  }
+
   return c.json({
     success: true,
-    action: 'voted',
+    action: 'liked',
+    isLiked: true,
     pointsAwarded,
-    message: `Marked as helpful${rewardMessage}`,
+    message: `Liked${rewardMessage}`,
   });
-});
+}
+
+rewardsApp.post('/replies/:id/helpful', authMiddleware, handleReplyLikeOrVote);
+rewardsApp.post('/replies/:id/like', authMiddleware, handleReplyLikeOrVote);
 
 rewardsApp.post('/bazaar/:id/claim', authMiddleware, async (c) => {
   const user = c.get('user');

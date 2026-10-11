@@ -604,6 +604,10 @@ async function handleGetComments(c: any) {
       authorBadge,
       author_badge: authorBadge,
       founderSeq: row.founder_seq ?? null,
+      likeCount: helpfulCount,
+      like_count: helpfulCount,
+      isLiked: isHelpful,
+      is_liked: isHelpful,
       helpfulVotes: helpfulCount,
       helpful_votes: helpfulCount,
       isHelpfulVoted: isHelpful,
@@ -967,6 +971,15 @@ async function handleDeleteComment(c: any) {
   }
 
   await reversePoints(db, commentId, 'reply');
+
+  try {
+    const rewardedVotes = await db.prepare('SELECT voter_handle FROM helpful_votes WHERE reply_id = ? AND is_rewarded = 1')
+      .bind(commentId).all() as any;
+    for (const v of (rewardedVotes.results || [])) {
+      await reversePoints(db, `${commentId}_${v.voter_handle}`, 'vote');
+    }
+    await db.prepare('DELETE FROM helpful_votes WHERE reply_id = ?').bind(commentId).run();
+  } catch (_) {}
 
   return c.json({
     success: true,

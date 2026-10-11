@@ -187,7 +187,7 @@ export async function validateHelpfulVote(
   const cleanAuthor = authorHandle.replace(/^@+/, '').trim().toLowerCase();
 
   if (cleanVoter === cleanAuthor) {
-    return { eligible: false, reason: 'No self-votes allowed' };
+    return { eligible: false, reason: 'No self-likes allowed' };
   }
 
   const voterUser = await db.prepare(`
@@ -215,7 +215,7 @@ export async function validateHelpfulVote(
   `).bind(cleanVoter, cleanAuthor).first() as any;
 
   if ((todayVotes?.cnt || 0) >= 1) {
-    return { eligible: false, reason: 'Only 1 rewarded vote per author per day allowed' };
+    return { eligible: false, reason: 'Only 1 rewarded like per author per day allowed' };
   }
 
   const weeklyPairVotes = await db.prepare(`
@@ -227,16 +227,18 @@ export async function validateHelpfulVote(
   `).bind(cleanVoter, cleanAuthor, cleanAuthor, cleanVoter).first() as any;
 
   if ((weeklyPairVotes?.cnt || 0) >= 3) {
-    return { eligible: false, reason: 'Maximum 3 rewarded votes between the same pair of users per week' };
+    return { eligible: false, reason: 'Maximum 3 rewarded likes between the same pair of users per week' };
   }
 
   return { eligible: true };
 }
 
+export const validateCommentLike = validateHelpfulVote;
+
 export async function reversePoints(
   db: any,
   sourceId: string,
-  action: 'post' | 'reply' | 'bazaar'
+  action: 'post' | 'reply' | 'bazaar' | 'vote'
 ): Promise<{ reversed: boolean; delta: number; newBalance?: number }> {
   const cleanSourceId = (sourceId || '').trim();
   if (!cleanSourceId) {
@@ -312,7 +314,7 @@ export async function reversePoints(
   `).bind(newBalance, newLifetime, newDailyPoints, userHandle).run();
 
   if (originalLedger.credit_date === todayDate) {
-    const colName = action === 'post' ? 'posts_count' : (action === 'reply' ? 'replies_count' : 'listings_count');
+    const colName = action === 'post' ? 'posts_count' : (action === 'reply' ? 'replies_count' : (action === 'vote' ? 'votes_count' : 'listings_count'));
     await db.prepare(`
       UPDATE user_daily_rewards
       SET ${colName} = MAX(0, ${colName} - 1),
