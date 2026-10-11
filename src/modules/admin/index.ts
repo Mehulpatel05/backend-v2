@@ -7,6 +7,7 @@ import { getDatabase } from '../../db/db_context';
 import { AppConfig } from '../../utils/config';
 import { orchestrateAccountDeletion } from '../account_deletion';
 import { reversePoints } from '../rewards/anti_abuse';
+import { MASTER_CITIES, findMasterCity, generateFallbackAreas } from '../../data/master_cities';
 
 const adminApp = new Hono<{ Bindings: Env; Variables: Variables }>();
 
@@ -506,6 +507,241 @@ adminApp.post('/broadcast', async (c) => {
     timestamp: new Date().toISOString(),
     message: `Push notification successfully queued for ${area}`,
   });
+});
+
+adminApp.get('/cities', async (c) => {
+  const db = getDatabase(c);
+  try {
+    const { results } = await db.prepare(`
+      SELECT 
+        c.id, 
+        c.name, 
+        c.state_id as stateId, 
+        c.lat, 
+        c.lng, 
+        c.pincode, 
+        c.is_active as isActive,
+        c.created_at as createdAt,
+        (SELECT COUNT(*) FROM city_areas WHERE city_id = c.id) as areasCount,
+        (SELECT COUNT(*) FROM founding_requests WHERE city_id = c.id AND status = 'pending') as pendingCount,
+        (SELECT COUNT(*) FROM area_founders WHERE area_id LIKE c.id || '%') as approvedCount
+      FROM cities c
+      ORDER BY c.name ASC
+    `).all();
+
+    if (!results || results.length === 0) {
+      const defaultCity = MASTER_CITIES[0];
+      return c.json({
+        success: true,
+        cities: [{
+          id: defaultCity.id,
+          name: defaultCity.name,
+          stateId: defaultCity.stateId,
+          lat: defaultCity.lat,
+          lng: defaultCity.lng,
+          pincode: defaultCity.pincode,
+          isActive: 1,
+          areasCount: defaultCity.areas.length,
+          pendingCount: 0,
+          approvedCount: 0,
+        }],
+      });
+    }
+
+    return c.json({ success: true, cities: results });
+  } catch (e: any) {
+    return c.json({ success: false, error: e.message }, 500);
+  }
+});
+
+adminApp.post('/cities', async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const rawName = (body.name || '').trim();
+  const rawStateId = (body.stateId || body.state_id || 'GJ').trim().toUpperCase();
+
+  if (!rawName || rawName.length < 2) {
+    return c.json({ success: false, error: 'City name must be at least 2 characters' }, 400);
+  }
+
+  const db = getDatabase(c);
+
+  try {
+    const existing = (await db.prepare(
+      'SELECT id, name FROM cities WHERE LOWER(name) = LOWER(?) OR LOWER(id) = LOWER(?)'
+    ).bind(rawName, rawName).first()) as any;
+
+    if (existing) {
+      return c.json({ success: false, error: `City '${existing.name}' already exists.` }, 400);
+    }
+
+    const matchedMaster = findMasterCity(rawName);
+
+    let cityId = '';
+    let cityName = rawName;
+    let stateId = rawStateId;
+    let lat = 0;
+    let lng = 0;
+    let pincode = '';
+    let areasToInsert: Array<{ id: string; name: string; pincode?: string; lat?: number; lng?: number }> = [];
+
+    if (matchedMaster) {
+      cityId = matchedMaster.id;
+      cityName = matchedMaster.name;
+      stateId = matchedMaster.stateId;
+      lat = matchedMaster.lat;
+      lng = matchedMaster.lng;
+      pincode = matchedMaster.pincode;
+      areasToInsert = matchedMaster.areas;
+    } else {
+      const slug = rawName.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 4);
+      cityId = `${stateId}-${slug || Date.now().toString(36).toUpperCase()}`;
+      areasToInsert = generateFallbackAreas(rawName, cityId);
+    }
+
+    const existingById = await db.prepare('SELECT id FROM cities WHERE id = ?').bind(cityId).first();
+    if (existingById) {
+      cityId = `${cityId}-${Math.floor(10 + Math.random() * 90)}`;
+    }
+
+    await db.prepare(`
+      INSERT INTO cities (id, name, state_id, lat, lng, pincode, is_active, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+    `).bind(cityId, cityName, stateId, lat, lng, pincode).run();
+
+    for (let i = 0; i < areasToInsert.length; i++) {
+      const area = areasToInsert[i];
+      await db.prepare(`
+        INSERT OR REPLACE INTO city_areas (id, city_id, name, pincode, lat, lng, is_active, sort_order, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, 1, ?, CURRENT_TIMESTAMP)
+      `).bind(
+        area.id,
+        cityId,
+        area.name,
+        area.pincode || '',
+        area.lat || null,
+        area.lng || null,
+        i
+      ).run();
+    }
+
+    return c.json({
+      success: true,
+      message: `City '${cityName}' added successfully with ${areasToInsert.length} localities.`,
+      city: {
+        id: cityId,
+        name: cityName,
+        stateId,
+        lat,
+        lng,
+        pincode,
+        isActive: 1,
+        areasCount: areasToInsert.length,
+      },
+      areasCount: areasToInsert.length,
+    });
+  } catch (e: any) {
+    return c.json({ success: false, error: e.message }, 500);
+  }
+});
+
+adminApp.patch('/cities/:id/toggle', async (c) => {
+  const cityId = c.req.param('id');
+  const db = getDatabase(c);
+
+  try {
+    const city = (await db.prepare('SELECT id, is_active FROM cities WHERE id = ?').bind(cityId).first()) as any;
+    if (!city) {
+      return c.json({ success: false, error: 'City not found' }, 404);
+    }
+
+    const nextState = city.is_active === 1 ? 0 : 1;
+    await db.prepare('UPDATE cities SET is_active = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
+      .bind(nextState, cityId)
+      .run();
+
+    return c.json({
+      success: true,
+      isActive: nextState,
+      message: `City status changed to ${nextState === 1 ? 'active' : 'disabled'}`,
+    });
+  } catch (e: any) {
+    return c.json({ success: false, error: e.message }, 500);
+  }
+});
+
+adminApp.delete('/cities/:id', async (c) => {
+  const cityId = c.req.param('id');
+  const db = getDatabase(c);
+
+  try {
+    await db.prepare('DELETE FROM city_areas WHERE city_id = ?').bind(cityId).run();
+    await db.prepare('DELETE FROM cities WHERE id = ?').bind(cityId).run();
+    return c.json({ success: true, message: 'City and associated areas deleted' });
+  } catch (e: any) {
+    return c.json({ success: false, error: e.message }, 500);
+  }
+});
+
+adminApp.get('/cities/:id/areas', async (c) => {
+  const cityId = c.req.param('id');
+  const db = getDatabase(c);
+
+  try {
+    const cityRow = (await db.prepare('SELECT name FROM cities WHERE id = ?').bind(cityId).first()) as any;
+    const { results } = await db.prepare(`
+      SELECT 
+        ca.id, 
+        ca.city_id as cityId, 
+        ca.name, 
+        ca.pincode, 
+        ca.lat, 
+        ca.lng, 
+        ca.is_active as isActive,
+        ca.sort_order as sortOrder
+      FROM city_areas ca
+      WHERE ca.city_id = ?
+      ORDER BY ca.sort_order ASC, ca.name ASC
+    `).bind(cityId).all();
+
+    return c.json({
+      success: true,
+      cityName: cityRow?.name || cityId,
+      areas: results || [],
+    });
+  } catch (e: any) {
+    return c.json({ success: false, error: e.message }, 500);
+  }
+});
+
+adminApp.post('/cities/:id/areas', async (c) => {
+  const cityId = c.req.param('id');
+  const body = await c.req.json().catch(() => ({}));
+  const name = (body.name || '').trim();
+  const pincode = (body.pincode || '').trim();
+
+  if (!name) {
+    return c.json({ success: false, error: 'Area name is required' }, 400);
+  }
+
+  const db = getDatabase(c);
+
+  try {
+    const slug = name.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8);
+    const areaId = `${cityId}-${slug || Date.now().toString(36).toUpperCase()}`;
+
+    await db.prepare(`
+      INSERT OR REPLACE INTO city_areas (id, city_id, name, pincode, is_active, sort_order, created_at)
+      VALUES (?, ?, ?, ?, 1, 999, CURRENT_TIMESTAMP)
+    `).bind(areaId, cityId, name, pincode).run();
+
+    return c.json({
+      success: true,
+      area: { id: areaId, cityId, name, pincode, isActive: 1 },
+      message: `Area '${name}' added successfully.`,
+    });
+  } catch (e: any) {
+    return c.json({ success: false, error: e.message }, 500);
+  }
 });
 
 export { adminApp };

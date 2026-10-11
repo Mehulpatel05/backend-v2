@@ -3,6 +3,7 @@ import { Env, Variables } from '../../types';
 import { authMiddleware } from '../../middleware/auth';
 import { adminAuthMiddleware } from '../../middleware/admin_auth';
 import { getDatabase } from '../../db/db_context';
+import { MASTER_CITIES, findMasterCity, generateFallbackAreas } from '../../data/master_cities';
 
 export const foundingApp = new Hono<{ Bindings: Env; Variables: Variables }>();
 export const adminFoundingApp = new Hono<{ Bindings: Env; Variables: Variables }>();
@@ -282,6 +283,70 @@ foundingApp.post('/request', authMiddleware, async (c) => {
   }
 });
 
+foundingApp.get('/cities', async (c) => {
+  const db = getDatabase(c);
+  try {
+    const { results } = await db.prepare(`
+      SELECT 
+        c.id, 
+        c.name, 
+        c.state_id as stateId, 
+        c.lat, 
+        c.lng, 
+        c.pincode,
+        (SELECT COUNT(*) FROM city_areas WHERE city_id = c.id) as areasCount
+      FROM cities c
+      WHERE c.is_active = 1
+      ORDER BY c.name ASC
+    `).all();
+
+    if (results && results.length > 0) {
+      return c.json({ success: true, cities: results });
+    }
+
+    return c.json({
+      success: true,
+      cities: MASTER_CITIES.map((mc) => ({
+        id: mc.id,
+        name: mc.name,
+        stateId: mc.stateId,
+        lat: mc.lat,
+        lng: mc.lng,
+        pincode: mc.pincode,
+        areasCount: mc.areas.length,
+      })),
+    });
+  } catch (e: any) {
+    return c.json({ success: false, error: e.message }, 500);
+  }
+});
+
+foundingApp.get('/cities/:city_id/areas', async (c) => {
+  const cityId = c.req.param('city_id');
+  const db = getDatabase(c);
+  try {
+    const { results } = await db.prepare(`
+      SELECT id, city_id as cityId, name, pincode, lat, lng
+      FROM city_areas
+      WHERE city_id = ? AND is_active = 1
+      ORDER BY sort_order ASC, name ASC
+    `).bind(cityId).all();
+
+    if (results && results.length > 0) {
+      return c.json({ success: true, areas: results });
+    }
+
+    const masterCity = findMasterCity(cityId);
+    if (masterCity) {
+      return c.json({ success: true, areas: masterCity.areas });
+    }
+
+    return c.json({ success: true, areas: [] });
+  } catch (e: any) {
+    return c.json({ success: false, error: e.message }, 500);
+  }
+});
+
 // ── ADMIN ROUTES ────────────────────────────────────────────────────────────
 
 adminFoundingApp.use('/*', adminAuthMiddleware);
@@ -290,17 +355,35 @@ adminFoundingApp.get('/cities', async (c) => {
   const db = getDatabase(c);
 
   try {
-    const cities = [
-      { id: 'GJ-VAD', name: 'Vadodara' },
-      { id: 'MH-MUM', name: 'Mumbai' },
-      { id: 'MH-PUN', name: 'Pune' },
-      { id: 'DL-DEL', name: 'Delhi' },
-      { id: 'KA-BLR', name: 'Bangalore' },
-      { id: 'TS-HYD', name: 'Hyderabad' },
-    ];
+    const { results: dbCities } = await db.prepare(`
+      SELECT 
+        c.id, 
+        c.name, 
+        c.state_id as stateId, 
+        c.is_active as isActive,
+        (SELECT COUNT(*) FROM founding_requests WHERE city_id = c.id AND status = 'pending') as pendingCount,
+        (SELECT COUNT(*) FROM area_founders WHERE area_id LIKE c.id || '%') as approvedCount
+      FROM cities c
+      ORDER BY c.name ASC
+    `).all();
 
+    if (dbCities && dbCities.length > 0) {
+      return c.json({
+        success: true,
+        cities: dbCities.map((row: any) => ({
+          cityId: row.id,
+          name: row.name,
+          stateId: row.stateId,
+          isActive: row.isActive === 1,
+          pendingCount: Number(row.pendingCount || 0),
+          approvedCount: Number(row.approvedCount || 0),
+        })),
+      });
+    }
+
+    const fallbackCities = MASTER_CITIES.map((mc) => ({ id: mc.id, name: mc.name }));
     const results = [];
-    for (const city of cities) {
+    for (const city of fallbackCities) {
       const pendingRow = (await db.prepare(
         "SELECT COUNT(*) as cnt FROM founding_requests WHERE city_id = ? AND status = 'pending'"
       ).bind(city.id).first()) as any;
@@ -323,17 +406,133 @@ adminFoundingApp.get('/cities', async (c) => {
   }
 });
 
+adminFoundingApp.post('/cities', async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const rawName = (body.name || '').trim();
+  const rawStateId = (body.stateId || body.state_id || 'GJ').trim().toUpperCase();
+
+  if (!rawName || rawName.length < 2) {
+    return c.json({ success: false, error: 'City name must be at least 2 characters' }, 400);
+  }
+
+  const db = getDatabase(c);
+
+  try {
+    const existing = (await db.prepare(
+      'SELECT id, name FROM cities WHERE LOWER(name) = LOWER(?) OR LOWER(id) = LOWER(?)'
+    ).bind(rawName, rawName).first()) as any;
+
+    if (existing) {
+      return c.json({ success: false, error: `City '${existing.name}' already exists.` }, 400);
+    }
+
+    const matchedMaster = findMasterCity(rawName);
+
+    let cityId = '';
+    let cityName = rawName;
+    let stateId = rawStateId;
+    let lat = 0;
+    let lng = 0;
+    let pincode = '';
+    let areasToInsert: Array<{ id: string; name: string; pincode?: string; lat?: number; lng?: number }> = [];
+
+    if (matchedMaster) {
+      cityId = matchedMaster.id;
+      cityName = matchedMaster.name;
+      stateId = matchedMaster.stateId;
+      lat = matchedMaster.lat;
+      lng = matchedMaster.lng;
+      pincode = matchedMaster.pincode;
+      areasToInsert = matchedMaster.areas;
+    } else {
+      const slug = rawName.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 4);
+      cityId = `${stateId}-${slug || Date.now().toString(36).toUpperCase()}`;
+      areasToInsert = generateFallbackAreas(rawName, cityId);
+    }
+
+    const existingById = await db.prepare('SELECT id FROM cities WHERE id = ?').bind(cityId).first();
+    if (existingById) {
+      cityId = `${cityId}-${Math.floor(10 + Math.random() * 90)}`;
+    }
+
+    await db.prepare(`
+      INSERT INTO cities (id, name, state_id, lat, lng, pincode, is_active, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+    `).bind(cityId, cityName, stateId, lat, lng, pincode).run();
+
+    for (let i = 0; i < areasToInsert.length; i++) {
+      const area = areasToInsert[i];
+      await db.prepare(`
+        INSERT OR REPLACE INTO city_areas (id, city_id, name, pincode, lat, lng, is_active, sort_order, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, 1, ?, CURRENT_TIMESTAMP)
+      `).bind(
+        area.id,
+        cityId,
+        area.name,
+        area.pincode || '',
+        area.lat || null,
+        area.lng || null,
+        i
+      ).run();
+    }
+
+    return c.json({
+      success: true,
+      message: `City '${cityName}' added successfully with ${areasToInsert.length} localities.`,
+      city: {
+        cityId,
+        name: cityName,
+        stateId,
+        pendingCount: 0,
+        approvedCount: 0,
+      },
+      areasCount: areasToInsert.length,
+    });
+  } catch (e: any) {
+    return c.json({ success: false, error: e.message }, 500);
+  }
+});
+
 adminFoundingApp.get('/cities/:city_id/areas', async (c) => {
   const cityId = c.req.param('city_id');
   const db = getDatabase(c);
 
   try {
-    const areasList = Object.entries(AREA_NAMES)
-      .filter(([id]) => id.startsWith(cityId))
-      .map(([id, name]) => ({ id, name }));
+    const cityRow = (await db.prepare('SELECT name FROM cities WHERE id = ?').bind(cityId).first()) as any;
+    const cityName = cityRow?.name || getCityName(cityId);
+
+    const { results: dbAreas } = await db.prepare(`
+      SELECT 
+        ca.id, 
+        ca.name,
+        (SELECT COUNT(*) FROM founding_requests WHERE area_id = ca.id AND status = 'pending') as pendingCount,
+        (SELECT COUNT(*) FROM area_founders WHERE area_id = ca.id) as approvedCount
+      FROM city_areas ca
+      WHERE ca.city_id = ? AND ca.is_active = 1
+      ORDER BY ca.sort_order ASC, ca.name ASC
+    `).bind(cityId).all();
+
+    if (dbAreas && dbAreas.length > 0) {
+      const results = dbAreas.map((row: any) => {
+        const approvedCount = Number(row.approvedCount || 0);
+        return {
+          areaId: row.id,
+          name: row.name,
+          pendingCount: Number(row.pendingCount || 0),
+          approvedCount,
+          spotsLeft: Math.max(0, 100 - approvedCount),
+        };
+      });
+      return c.json({ success: true, areas: results, cityName });
+    }
+
+    const masterCity = findMasterCity(cityId);
+    const fallbackList = masterCity
+      ? masterCity.areas
+      : Object.entries(AREA_NAMES).filter(([id]) => id.startsWith(cityId)).map(([id, name]) => ({ id, name }));
 
     const results = [];
-    for (const area of areasList) {
+    for (const area of fallbackList) {
       const pendingRow = (await db.prepare(
         "SELECT COUNT(*) as cnt FROM founding_requests WHERE area_id = ? AND status = 'pending'"
       ).bind(area.id).first()) as any;
@@ -351,7 +550,7 @@ adminFoundingApp.get('/cities/:city_id/areas', async (c) => {
       });
     }
 
-    return c.json({ success: true, areas: results, cityName: getCityName(cityId) });
+    return c.json({ success: true, areas: results, cityName });
   } catch (e: any) {
     return c.json({ success: false, error: e.message }, 500);
   }
