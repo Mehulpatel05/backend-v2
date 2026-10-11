@@ -6,6 +6,7 @@ import { hashToken, timingSafeEqual } from '../../middleware/auth';
 import { getDatabase } from '../../db/db_context';
 import { AppConfig } from '../../utils/config';
 import { orchestrateAccountDeletion } from '../account_deletion';
+import { reversePoints } from '../rewards/anti_abuse';
 
 const adminApp = new Hono<{ Bindings: Env; Variables: Variables }>();
 
@@ -307,6 +308,7 @@ adminApp.post('/reports/:id/action', async (c) => {
       await db.prepare("UPDATE feed_posts SET status = 'deleted' WHERE id = ?")
         .bind(id)
         .run();
+      await reversePoints(db, id, 'post');
       return c.json({ success: true, message: 'Violating post removed immediately' });
     }
 
@@ -320,6 +322,7 @@ adminApp.post('/reports/:id/action', async (c) => {
       await db.prepare("UPDATE feed_posts SET status = 'deleted' WHERE id = ?")
         .bind(id)
         .run();
+      await reversePoints(db, id, 'post');
       return c.json({ success: true, message: `Post removed and author @${post?.author_handle} banned from device` });
     }
 

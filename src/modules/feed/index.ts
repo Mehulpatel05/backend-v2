@@ -4,6 +4,12 @@ import { authMiddleware } from '../../middleware/auth';
 import { getDatabase } from '../../db/db_context';
 import { sendPushNotification } from '../../services/fcm_service';
 import { awardPoints } from '../rewards';
+import {
+  validateContentQuality,
+  checkDuplicateContent,
+  checkPostCooldown,
+  reversePoints,
+} from '../rewards/anti_abuse';
 
 const feedApp = new Hono<{ Bindings: Env; Variables: Variables }>();
 
@@ -258,42 +264,81 @@ async function handleCreatePost(c: any) {
   let pointsAwarded = 0;
   let dailyCapReached = false;
   let newBalance: number | undefined;
+  let limitReason: string | undefined;
 
-  if (content.length >= 20 && category !== 'safety' && category !== 'urgent_safety') {
+  let isValidForReward = false;
+  if (category !== 'safety' && category !== 'urgent_safety') {
+    const quality = validateContentQuality(content);
+    if (!quality.valid) {
+      limitReason = quality.error;
+    } else {
+      const duplicateCheck = await checkDuplicateContent(db, cleanHandle, content, 'post');
+      if (duplicateCheck.isDuplicate) {
+        limitReason = duplicateCheck.error;
+      } else {
+        const cooldownCheck = await checkPostCooldown(db, cleanHandle);
+        if (!cooldownCheck.allowed) {
+          limitReason = cooldownCheck.error;
+        } else {
+          isValidForReward = true;
+          try {
+            const rewardResult = await awardPoints(db, {
+              userHandle: cleanHandle,
+              delta: 5,
+              reason: 'Created a post in your neighbourhood',
+              action: 'post',
+              sourceId: postId,
+              isAction: true,
+            });
+            pointsAwarded = rewardResult.awardedDelta;
+            dailyCapReached = rewardResult.capReached ?? false;
+            newBalance = rewardResult.newBalance;
+            if (!rewardResult.success) {
+              limitReason = rewardResult.limitReason;
+            }
+          } catch (_) {}
+        }
+      }
+    }
+  }
+
+  if (isValidForReward) {
     try {
-      const rewardResult = await awardPoints(db, {
-        userHandle: cleanHandle,
-        delta: 5,
-        reason: 'Created a post in your neighbourhood',
-        refType: 'post',
-        refId: postId,
-        isAction: true,
-      });
-      pointsAwarded = rewardResult.awardedDelta;
-      dailyCapReached = rewardResult.capReached ?? false;
-      newBalance = rewardResult.newBalance;
-
-      const pendingRef = await db.prepare("SELECT * FROM referrals WHERE invitee_handle = ? AND status = 'pending'")
+      const pendingRef = await db.prepare("SELECT * FROM referrals WHERE LOWER(invitee_handle) = LOWER(?) AND status = 'pending'")
         .bind(cleanHandle).first() as any;
       if (pendingRef) {
-        await db.prepare("UPDATE referrals SET status = 'rewarded', rewarded_at = CURRENT_TIMESTAMP WHERE id = ?")
-          .bind(pendingRef.id).run();
-        await awardPoints(db, {
-          userHandle: pendingRef.inviter_handle,
-          delta: 25,
-          reason: `Friend @${cleanHandle} made their first post`,
-          refType: 'invite',
-          refId: pendingRef.id,
-          isAction: false,
-        });
-        await awardPoints(db, {
-          userHandle: cleanHandle,
-          delta: 25,
-          reason: 'Created first post after joining via invite',
-          refType: 'invite',
-          refId: pendingRef.id,
-          isAction: false,
-        });
+        const inviteeUser = await db.prepare("SELECT is_verified FROM users WHERE LOWER(handle) = LOWER(?) OR LOWER(handle) = LOWER(?)")
+          .bind(cleanHandle, `@${cleanHandle}`).first() as any;
+
+        const now = new Date();
+        const currentMonthStart = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
+        const monthlyInvites = await db.prepare(`
+          SELECT COUNT(*) as cnt FROM referrals
+          WHERE LOWER(inviter_handle) = LOWER(?)
+            AND status = 'rewarded'
+            AND created_at >= ?
+        `).bind(pendingRef.inviter_handle, currentMonthStart).first() as any;
+
+        if (inviteeUser?.is_verified === 1 && (monthlyInvites?.cnt || 0) < 5) {
+          await db.prepare("UPDATE referrals SET status = 'rewarded', rewarded_at = CURRENT_TIMESTAMP WHERE id = ?")
+            .bind(pendingRef.id).run();
+          await awardPoints(db, {
+            userHandle: pendingRef.inviter_handle,
+            delta: 25,
+            reason: `Friend @${cleanHandle} made their first post`,
+            action: 'referral',
+            sourceId: `ref_inviter_${pendingRef.id}`,
+            isAction: false,
+          });
+          await awardPoints(db, {
+            userHandle: cleanHandle,
+            delta: 25,
+            reason: 'Created first post after joining via invite',
+            action: 'referral',
+            sourceId: `ref_invitee_${pendingRef.id}`,
+            isAction: false,
+          });
+        }
       }
     } catch (_) {}
   }
@@ -305,6 +350,7 @@ async function handleCreatePost(c: any) {
     pointsAwarded,
     dailyCapReached,
     newBalance,
+    limitReason,
     post: {
       id: postId,
       authorHandle: cleanHandle,
@@ -586,10 +632,6 @@ async function handleAddComment(c: any) {
     db.prepare('UPDATE feed_posts SET comments_count = comments_count + 1 WHERE id = ?').bind(postId),
   ]);
 
-  let pointsAwarded = 0;
-  let dailyCapReached = false;
-  let newBalance: number | undefined;
-
   const cleanAuthor = (post?.author_handle || '').replace(/^@+/, '').trim().toLowerCase();
   const cleanUser = (user.userHandle || '').replace(/^@+/, '').trim().toLowerCase();
 
@@ -623,20 +665,40 @@ async function handleAddComment(c: any) {
     } catch (_) {}
   }
 
-  if (content.length >= 10 && cleanAuthor !== cleanUser) {
-    try {
-      const rewardResult = await awardPoints(db, {
-        userHandle: cleanUser,
-        delta: 3,
-        reason: 'Replied to a neighbour’s post',
-        refType: 'reply',
-        refId: commentId,
-        isAction: true,
-      });
-      pointsAwarded = rewardResult.awardedDelta;
-      dailyCapReached = rewardResult.capReached ?? false;
-      newBalance = rewardResult.newBalance;
-    } catch (_) {}
+  let pointsAwarded = 0;
+  let dailyCapReached = false;
+  let newBalance: number | undefined;
+  let limitReason: string | undefined;
+
+  if (cleanAuthor === cleanUser) {
+    limitReason = 'Cannot earn reward replying to your own post';
+  } else {
+    const quality = validateContentQuality(content);
+    if (!quality.valid) {
+      limitReason = quality.error;
+    } else {
+      const duplicateCheck = await checkDuplicateContent(db, cleanUser, content, 'reply');
+      if (duplicateCheck.isDuplicate) {
+        limitReason = duplicateCheck.error;
+      } else {
+        try {
+          const rewardResult = await awardPoints(db, {
+            userHandle: cleanUser,
+            delta: 3,
+            reason: 'Replied to a neighbour’s post',
+            action: 'reply',
+            sourceId: commentId,
+            isAction: true,
+          });
+          pointsAwarded = rewardResult.awardedDelta;
+          dailyCapReached = rewardResult.capReached ?? false;
+          newBalance = rewardResult.newBalance;
+          if (!rewardResult.success) {
+            limitReason = rewardResult.limitReason;
+          }
+        } catch (_) {}
+      }
+    }
   }
 
   return c.json({
@@ -645,6 +707,7 @@ async function handleAddComment(c: any) {
     pointsAwarded,
     dailyCapReached,
     newBalance,
+    limitReason,
     message: 'Comment added successfully',
   }, 201);
 }
@@ -843,14 +906,51 @@ async function handleDeletePost(c: any) {
     return c.json({ success: false, error: 'Post not found or unauthorized' }, 404);
   }
 
+  await reversePoints(db, postId, 'post');
+
   return c.json({
     success: true,
     message: 'Post deleted successfully',
   });
 }
 
+async function handleDeleteComment(c: any) {
+  const user = c.get('user');
+  const commentId = c.req.param('commentId') || c.req.param('id');
+  const db = getDatabase(c);
+
+  const comment = (await db.prepare('SELECT post_id, author_handle FROM feed_comments WHERE id = ?')
+    .bind(commentId).first()) as any;
+
+  if (!comment) {
+    return c.json({ success: false, error: 'Comment not found' }, 404);
+  }
+
+  const cleanAuthor = (comment.author_handle || '').replace(/^@+/, '').trim().toLowerCase();
+  const cleanUser = (user.userHandle || '').replace(/^@+/, '').trim().toLowerCase();
+
+  if (cleanAuthor !== cleanUser) {
+    return c.json({ success: false, error: 'Unauthorized to delete this comment' }, 403);
+  }
+
+  await db.prepare('DELETE FROM feed_comments WHERE id = ?').bind(commentId).run();
+  if (comment.post_id) {
+    await db.prepare('UPDATE feed_posts SET comments_count = MAX(0, comments_count - 1) WHERE id = ?')
+      .bind(comment.post_id).run();
+  }
+
+  await reversePoints(db, commentId, 'reply');
+
+  return c.json({
+    success: true,
+    message: 'Comment deleted successfully',
+  });
+}
+
 feedApp.delete('/:id', authMiddleware, handleDeletePost);
 feedApp.delete('/posts/:id', authMiddleware, handleDeletePost);
+feedApp.delete('/comments/:id', authMiddleware, handleDeleteComment);
+feedApp.delete('/posts/:postId/comments/:id', authMiddleware, handleDeleteComment);
 
 export { feedApp };
 

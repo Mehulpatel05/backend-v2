@@ -2,30 +2,95 @@ import { Hono } from 'hono';
 import { Env, Variables } from '../../types';
 import { authMiddleware } from '../../middleware/auth';
 import { getDatabase } from '../../db/db_context';
+import {
+  checkAndFlagDailyCapAbuse,
+  validateHelpfulVote,
+  validateReferralApplication,
+  reversePoints,
+} from './anti_abuse';
 
 export const rewardsApp = new Hono<{ Bindings: Env; Variables: Variables }>();
 
-const DAILY_POINTS_CAP = 50;
-const BOOST_COST = 300;
+export const DAILY_POINTS_CAP = 50;
+export const DAILY_POSTS_LIMIT = 3;
+export const DAILY_REPLIES_LIMIT = 5;
+export const DAILY_VOTES_LIMIT = 5;
+export const DAILY_LISTINGS_LIMIT = 3;
+export const MONTHLY_INVITES_LIMIT = 5;
+export const STREAK_BONUS_POINTS = 30;
+export const BOOST_COST = 300;
 
-function getTodayString(): string {
+const rewardsRateMap = new Map<string, { count: number; resetTime: number }>();
+
+export function rateLimitRewards(maxRequests = 60, windowMs = 60_000) {
+  return async (c: any, next: any) => {
+    const user = c.get('user');
+    const key = (user?.userHandle || c.req.header('x-forwarded-for') || 'anonymous')
+      .replace(/^@+/, '')
+      .trim()
+      .toLowerCase();
+    const now = Date.now();
+    const current = rewardsRateMap.get(key);
+
+    if (!current || now > current.resetTime) {
+      rewardsRateMap.set(key, { count: 1, resetTime: now + windowMs });
+    } else {
+      current.count++;
+      if (current.count > maxRequests) {
+        return c.json({ success: false, error: 'Rate limit exceeded. Please wait a moment.' }, 429);
+      }
+    }
+    await next();
+  };
+}
+
+rewardsApp.use('/*', rateLimitRewards());
+
+export function getTodayString(timezoneOffsetHours: number = 5.5): string {
   const d = new Date();
-  const istOffset = 5.5 * 60 * 60 * 1000;
-  const istDate = new Date(d.getTime() + istOffset);
+  const offset = timezoneOffsetHours * 60 * 60 * 1000;
+  const istDate = new Date(d.getTime() + offset);
   return istDate.toISOString().split('T')[0];
 }
 
-function getYesterdayString(): string {
+export function getYesterdayString(timezoneOffsetHours: number = 5.5): string {
   const d = new Date();
-  const istOffset = 5.5 * 60 * 60 * 1000;
-  const istYesterday = new Date(d.getTime() + istOffset - 24 * 60 * 60 * 1000);
+  const offset = timezoneOffsetHours * 60 * 60 * 1000;
+  const istYesterday = new Date(d.getTime() + offset - 24 * 60 * 60 * 1000);
   return istYesterday.toISOString().split('T')[0];
+}
+
+export async function getOrCreateDailyActivity(db: any, userHandle: string, date: string): Promise<any> {
+  const clean = userHandle.replace(/^@+/, '').trim();
+  let row = await db.prepare('SELECT * FROM user_daily_rewards WHERE user_handle = ? AND date = ?')
+    .bind(clean, date).first();
+
+  if (!row) {
+    try {
+      await db.prepare(`
+        INSERT INTO user_daily_rewards (user_handle, date, posts_count, replies_count, votes_count, listings_count, daily_points)
+        VALUES (?, ?, 0, 0, 0, 0, 0)
+      `).bind(clean, date).run();
+    } catch (_) {}
+    row = await db.prepare('SELECT * FROM user_daily_rewards WHERE user_handle = ? AND date = ?')
+      .bind(clean, date).first();
+  }
+
+  return row || {
+    user_handle: clean,
+    date,
+    posts_count: 0,
+    replies_count: 0,
+    votes_count: 0,
+    listings_count: 0,
+    daily_points: 0,
+  };
 }
 
 export async function getOrCreateUserRewards(db: any, userHandle: string): Promise<any> {
   const clean = userHandle.replace(/^@+/, '').trim();
   let row = await db.prepare('SELECT * FROM user_rewards WHERE user_handle = ?').bind(clean).first();
-  const today = getTodayString();
+  const today = getTodayString(row?.timezone_offset || 5.5);
 
   if (!row) {
     let inserted = false;
@@ -34,13 +99,11 @@ export async function getOrCreateUserRewards(db: any, userHandle: string): Promi
       const randomCode = `NEAR-${clean.substring(0, 4).toUpperCase()}${randomSuffix}`;
       try {
         await db.prepare(`
-          INSERT INTO user_rewards (user_handle, balance, lifetime_points, weekly_points, streak_count, last_streak_date, daily_points_today, daily_date, referral_code)
-          VALUES (?, 0, 0, 0, 0, '', 0, ?, ?)
+          INSERT INTO user_rewards (user_handle, balance, lifetime_points, weekly_points, streak_count, last_streak_date, daily_points_today, daily_date, referral_code, timezone_offset)
+          VALUES (?, 0, 0, 0, 0, '', 0, ?, ?, 5.5)
         `).bind(clean, today, randomCode).run();
         inserted = true;
-      } catch (_) {
-        // Unique referral_code collision: retry
-      }
+      } catch (_) {}
     }
     row = await db.prepare('SELECT * FROM user_rewards WHERE user_handle = ?').bind(clean).first();
   } else if (row.daily_date !== today) {
@@ -50,6 +113,8 @@ export async function getOrCreateUserRewards(db: any, userHandle: string): Promi
     row.daily_date = today;
   }
 
+  await getOrCreateDailyActivity(db, clean, today);
+
   return row;
 }
 
@@ -57,31 +122,102 @@ export async function awardPoints(db: any, params: {
   userHandle: string;
   delta: number;
   reason: string;
-  refType: string;
+  action?: string;
+  refType?: string;
+  sourceId?: string;
   refId?: string;
   isAction?: boolean;
-}): Promise<{ success: boolean; awardedDelta: number; newBalance: number; capReached?: boolean }> {
+}): Promise<{
+  success: boolean;
+  awardedDelta: number;
+  newBalance: number;
+  capReached?: boolean;
+  limitReached?: boolean;
+  isDuplicate?: boolean;
+  limitReason?: string;
+}> {
   const clean = params.userHandle.replace(/^@+/, '').trim();
-  const refId = params.refId || '';
-  const isAction = params.isAction ?? true;
+  const action = params.action || params.refType || 'unknown';
+  const sourceId = params.sourceId || params.refId || '';
+  const isAction = params.isAction ?? (['post', 'reply', 'vote', 'bazaar'].includes(action));
 
-  if (refId && params.delta > 0) {
-    const existing = await db.prepare('SELECT id FROM points_ledger WHERE user_handle = ? AND ref_type = ? AND ref_id = ?')
-      .bind(clean, params.refType, refId).first();
+  if (sourceId && params.delta > 0) {
+    const existing = await db.prepare(`
+      SELECT id FROM points_ledger
+      WHERE user_handle = ?
+        AND (action = ? OR ref_type = ?)
+        AND (source_id = ? OR ref_id = ?)
+      LIMIT 1
+    `).bind(clean, action, action, sourceId, sourceId).first();
+
     if (existing) {
       const userRewards = await getOrCreateUserRewards(db, clean);
-      return { success: true, awardedDelta: 0, newBalance: userRewards.balance };
+      return {
+        success: false,
+        awardedDelta: 0,
+        newBalance: userRewards.balance,
+        isDuplicate: true,
+        limitReason: 'Event has already been rewarded',
+      };
     }
   }
 
   const rewards = await getOrCreateUserRewards(db, clean);
+  const today = getTodayString(rewards.timezone_offset || 5.5);
+  const daily = await getOrCreateDailyActivity(db, clean, today);
+
+  if (isAction && params.delta > 0) {
+    if (action === 'post' && (daily.posts_count || 0) >= DAILY_POSTS_LIMIT) {
+      return {
+        success: false,
+        awardedDelta: 0,
+        newBalance: rewards.balance,
+        limitReached: true,
+        limitReason: `Daily limit reached: maximum ${DAILY_POSTS_LIMIT} rewarded posts per day`,
+      };
+    }
+    if (action === 'reply' && (daily.replies_count || 0) >= DAILY_REPLIES_LIMIT) {
+      return {
+        success: false,
+        awardedDelta: 0,
+        newBalance: rewards.balance,
+        limitReached: true,
+        limitReason: `Daily limit reached: maximum ${DAILY_REPLIES_LIMIT} rewarded replies per day`,
+      };
+    }
+    if (action === 'vote' && (daily.votes_count || 0) >= DAILY_VOTES_LIMIT) {
+      return {
+        success: false,
+        awardedDelta: 0,
+        newBalance: rewards.balance,
+        limitReached: true,
+        limitReason: `Daily limit reached: maximum ${DAILY_VOTES_LIMIT} rewarded votes per day`,
+      };
+    }
+    if (action === 'bazaar' && (daily.listings_count || 0) >= DAILY_LISTINGS_LIMIT) {
+      return {
+        success: false,
+        awardedDelta: 0,
+        newBalance: rewards.balance,
+        limitReached: true,
+        limitReason: `Daily limit reached: maximum ${DAILY_LISTINGS_LIMIT} rewarded listings per day`,
+      };
+    }
+  }
+
   let effectiveDelta = params.delta;
   let capReached = false;
 
   if (isAction && params.delta > 0) {
-    const remainingCap = Math.max(0, DAILY_POINTS_CAP - rewards.daily_points_today);
+    const remainingCap = Math.max(0, DAILY_POINTS_CAP - (daily.daily_points || 0));
     if (remainingCap <= 0) {
-      return { success: false, awardedDelta: 0, newBalance: rewards.balance, capReached: true };
+      return {
+        success: false,
+        awardedDelta: 0,
+        newBalance: rewards.balance,
+        capReached: true,
+        limitReason: `Daily cap reached: ${DAILY_POINTS_CAP} of ${DAILY_POINTS_CAP} points used today`,
+      };
     }
     if (effectiveDelta > remainingCap) {
       effectiveDelta = remainingCap;
@@ -89,26 +225,64 @@ export async function awardPoints(db: any, params: {
     }
   }
 
-  const newBalance = Math.max(0, (rewards.balance || 0) + effectiveDelta);
-  const newLifetime = (rewards.lifetime_points || 0) + Math.max(0, effectiveDelta);
+  const newBalance = (rewards.balance || 0) + effectiveDelta;
+  const newLifetime = Math.max(0, (rewards.lifetime_points || 0) + Math.max(0, effectiveDelta));
   const newWeekly = (rewards.weekly_points || 0) + Math.max(0, effectiveDelta);
-  const newDaily = (rewards.daily_points_today || 0) + (isAction ? Math.max(0, effectiveDelta) : 0);
+  const newDailyPoints = (daily.daily_points || 0) + (isAction ? Math.max(0, effectiveDelta) : 0);
 
   const ledgerId = `led_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
-  await db.prepare(`
-    INSERT INTO points_ledger (id, user_handle, delta, reason, ref_type, ref_id, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-  `).bind(ledgerId, clean, effectiveDelta, params.reason, params.refType, refId).run();
+  try {
+    await db.prepare(`
+      INSERT INTO points_ledger (id, user_handle, delta, action, source_id, reason, ref_type, ref_id, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    `).bind(ledgerId, clean, effectiveDelta, action, sourceId, params.reason, action, sourceId).run();
+  } catch (err: any) {
+    if (String(err).toLowerCase().includes('unique')) {
+      return {
+        success: false,
+        awardedDelta: 0,
+        newBalance: rewards.balance,
+        isDuplicate: true,
+        limitReason: 'Event has already been rewarded',
+      };
+    }
+    throw err;
+  }
 
   await db.prepare(`
     UPDATE user_rewards
     SET balance = ?, lifetime_points = ?, weekly_points = ?, daily_points_today = ?, updated_at = CURRENT_TIMESTAMP
     WHERE user_handle = ?
-  `).bind(newBalance, newLifetime, newWeekly, newDaily, clean).run();
+  `).bind(newBalance, newLifetime, newWeekly, newDailyPoints, clean).run();
+
+  const postInc = action === 'post' ? 1 : 0;
+  const replyInc = action === 'reply' ? 1 : 0;
+  const voteInc = action === 'vote' ? 1 : 0;
+  const listingInc = action === 'bazaar' ? 1 : 0;
+
+  await db.prepare(`
+    UPDATE user_daily_rewards
+    SET posts_count = posts_count + ?,
+        replies_count = replies_count + ?,
+        votes_count = votes_count + ?,
+        listings_count = listings_count + ?,
+        daily_points = daily_points + ?,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE user_handle = ? AND date = ?
+  `).bind(postInc, replyInc, voteInc, listingInc, isAction ? Math.max(0, effectiveDelta) : 0, clean, today).run();
+
+  if (newDailyPoints >= DAILY_POINTS_CAP) {
+    await checkAndFlagDailyCapAbuse(db, clean, today);
+  }
 
   await checkAndAwardBadges(db, clean);
 
-  return { success: true, awardedDelta: effectiveDelta, newBalance, capReached };
+  return {
+    success: true,
+    awardedDelta: effectiveDelta,
+    newBalance,
+    capReached,
+  };
 }
 
 export async function checkAndAwardBadges(db: any, userHandle: string): Promise<void> {
@@ -159,8 +333,8 @@ rewardsApp.get('/me', authMiddleware, async (c) => {
 
   const rewards = await getOrCreateUserRewards(db, clean);
 
-  const today = getTodayString();
-  const yesterday = getYesterdayString();
+  const today = getTodayString(rewards.timezone_offset || 5.5);
+  const yesterday = getYesterdayString(rewards.timezone_offset || 5.5);
   let streakCount = rewards.streak_count || 0;
   let streakAwarded = false;
 
@@ -177,26 +351,62 @@ rewardsApp.get('/me', authMiddleware, async (c) => {
 
     let extraPoints = 0;
     if (streakCount === 7) {
-      extraPoints = 30;
+      extraPoints = STREAK_BONUS_POINTS;
       streakAwarded = true;
     }
 
+    const savedStreak = streakCount === 7 ? 0 : streakCount;
     await db.prepare('UPDATE user_rewards SET streak_count = ?, last_streak_date = ? WHERE user_handle = ?')
-      .bind(streakCount, today, clean).run();
+      .bind(savedStreak, today, clean).run();
 
     if (extraPoints > 0) {
       await awardPoints(db, {
         userHandle: clean,
         delta: extraPoints,
-        reason: '7-day streak bonus',
-        refType: 'streak',
-        refId: `streak_${today}`,
+        reason: '7-day streak loyalty bonus',
+        action: 'streak',
+        sourceId: `streak_${today}_${clean}`,
         isAction: false,
       });
       rewards.balance = (rewards.balance || 0) + extraPoints;
       rewards.lifetime_points = (rewards.lifetime_points || 0) + extraPoints;
     }
   }
+
+  const matureListings = await db.prepare(`
+    SELECT id, title, price, image_urls_json
+    FROM bazar_listings
+    WHERE (seller_handle = ? OR seller_handle = ?)
+      AND is_active = 1
+      AND reward_credited = 0
+      AND created_at <= datetime('now', '-24 hours')
+    LIMIT 3
+  `).bind(clean, `@${clean}`).all() as any;
+
+  for (const item of matureListings.results || []) {
+    let images: string[] = [];
+    try {
+      images = JSON.parse(item.image_urls_json || '[]');
+    } catch (_) {}
+
+    if (item.title && item.price > 0 && Array.isArray(images) && images.length > 0) {
+      const bRes = await awardPoints(db, {
+        userHandle: clean,
+        delta: 10,
+        reason: 'Listed an item in Bazaar for 24 hours',
+        action: 'bazaar',
+        sourceId: item.id,
+        isAction: true,
+      });
+      if (bRes.success) {
+        await db.prepare('UPDATE bazar_listings SET reward_credited = 1 WHERE id = ?').bind(item.id).run();
+        rewards.balance = (rewards.balance || 0) + bRes.awardedDelta;
+        rewards.lifetime_points = (rewards.lifetime_points || 0) + bRes.awardedDelta;
+      }
+    }
+  }
+
+  const daily = await getOrCreateDailyActivity(db, clean, today);
 
   const badges = await db.prepare('SELECT badge_key, earned_at FROM user_badges WHERE user_handle = ? ORDER BY earned_at DESC')
     .bind(clean).all() as any;
@@ -235,11 +445,41 @@ rewardsApp.get('/me', authMiddleware, async (c) => {
       weeklyPoints,
       streakCount: streakCount,
       streakAwarded,
-      dailyPointsToday: rewards.daily_points_today,
+      dailyPointsToday: daily.daily_points || 0,
       dailyCap: DAILY_POINTS_CAP,
+      isCapReached: (daily.daily_points || 0) >= DAILY_POINTS_CAP,
       referralCode: rewards.referral_code,
       highestHelpfulBadge,
       badges: badges.results || [],
+      dailyProgress: {
+        posts: {
+          current: daily.posts_count || 0,
+          max: DAILY_POSTS_LIMIT,
+          points: 5,
+          isLimitReached: (daily.posts_count || 0) >= DAILY_POSTS_LIMIT,
+        },
+        replies: {
+          current: daily.replies_count || 0,
+          max: DAILY_REPLIES_LIMIT,
+          points: 3,
+          isLimitReached: (daily.replies_count || 0) >= DAILY_REPLIES_LIMIT,
+        },
+        votes: {
+          current: daily.votes_count || 0,
+          max: DAILY_VOTES_LIMIT,
+          points: 5,
+          isLimitReached: (daily.votes_count || 0) >= DAILY_VOTES_LIMIT,
+        },
+        listings: {
+          current: daily.listings_count || 0,
+          max: DAILY_LISTINGS_LIMIT,
+          points: 10,
+          isLimitReached: (daily.listings_count || 0) >= DAILY_LISTINGS_LIMIT,
+        },
+        dailyCap: DAILY_POINTS_CAP,
+        dailyPointsUsed: daily.daily_points || 0,
+        isCapReached: (daily.daily_points || 0) >= DAILY_POINTS_CAP,
+      },
       progress: {
         helpfulVotes,
         soldCount,
@@ -416,42 +656,25 @@ rewardsApp.post('/referrals/apply', authMiddleware, async (c) => {
   const clean = (user.userHandle || '').replace(/^@+/, '').trim();
   const body = await c.req.json().catch(() => ({}));
   const code = (body.code || '').trim().toUpperCase();
+  const deviceId = (body.deviceId || body.device_id || '').trim();
   const db = getDatabase(c);
 
-  if (!code) {
-    return c.json({ success: false, error: 'Referral code is required' }, 400);
-  }
-
-  const inviterRewards = await db.prepare('SELECT user_handle FROM user_rewards WHERE referral_code = ?')
-    .bind(code).first() as any;
-
-  if (!inviterRewards) {
-    return c.json({ success: false, error: 'Invalid referral code' }, 404);
-  }
-
-  const inviterHandle = inviterRewards.user_handle;
-  if (inviterHandle === clean) {
-    return c.json({ success: false, error: 'Cannot refer yourself' }, 400);
-  }
-
-  const existingReferral = await db.prepare(
-    'SELECT id FROM referrals WHERE LOWER(invitee_handle) = LOWER(?) OR LOWER(invitee_handle) = LOWER(?) LIMIT 1'
-  ).bind(clean, `@${clean}`).first();
-  if (existingReferral) {
-    return c.json({ success: false, error: 'You have already applied a referral code.' }, 400);
+  const validation = await validateReferralApplication(db, clean, code, deviceId);
+  if (!validation.success) {
+    return c.json({ success: false, error: validation.error }, 400);
   }
 
   const referralId = `ref_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
   try {
     await db.prepare(`
-      INSERT INTO referrals (id, inviter_handle, invitee_handle, code, status, created_at)
-      VALUES (?, ?, ?, ?, 'pending', CURRENT_TIMESTAMP)
-    `).bind(referralId, inviterHandle, clean, code).run();
+      INSERT INTO referrals (id, inviter_handle, invitee_handle, code, status, device_id, created_at)
+      VALUES (?, ?, ?, ?, 'pending', ?, CURRENT_TIMESTAMP)
+    `).bind(referralId, validation.inviterHandle, clean, code, deviceId).run();
   } catch (_) {
     return c.json({ success: false, error: 'Referral already applied' }, 400);
   }
 
-  return c.json({ success: true, message: 'Referral applied! Post or list to earn +25 points.' });
+  return c.json({ success: true, message: 'Referral applied! Post in your neighbourhood to earn +25 points for both of you.' });
 });
 
 rewardsApp.post('/boost', authMiddleware, async (c) => {
@@ -623,35 +846,143 @@ rewardsApp.post('/replies/:id/helpful', authMiddleware, async (c) => {
     return c.json({ success: false, error: 'Cannot vote on your own reply' }, 400);
   }
 
-  const existingVote = await db.prepare('SELECT id FROM helpful_votes WHERE reply_id = ? AND voter_handle = ?')
-    .bind(replyId, voterHandle).first();
+  const existingVote = await db.prepare('SELECT id, is_rewarded FROM helpful_votes WHERE reply_id = ? AND voter_handle = ?')
+    .bind(replyId, voterHandle).first() as any;
 
   if (existingVote) {
     await db.prepare('DELETE FROM helpful_votes WHERE reply_id = ? AND voter_handle = ?')
       .bind(replyId, voterHandle).run();
+
+    if (existingVote.is_rewarded === 1) {
+      await reversePoints(db, `${replyId}_${voterHandle}`, 'vote' as any);
+    }
     return c.json({ success: true, action: 'unvoted', message: 'Helpful vote removed' });
+  }
+
+  const voteCheck = await validateHelpfulVote(db, voterHandle, authorHandle, replyId || '');
+
+  let isRewarded = 0;
+  let pointsAwarded = 0;
+  let rewardMessage = '';
+
+  if (voteCheck.eligible) {
+    const awardRes = await awardPoints(db, {
+      userHandle: authorHandle,
+      delta: 5,
+      reason: 'Reply marked helpful by a neighbour',
+      action: 'vote',
+      sourceId: `${replyId}_${voterHandle}`,
+      isAction: true,
+    });
+
+    if (awardRes.success && awardRes.awardedDelta > 0) {
+      isRewarded = 1;
+      pointsAwarded = awardRes.awardedDelta;
+      rewardMessage = ' · +5 pts awarded to author';
+    } else {
+      rewardMessage = awardRes.limitReason ? ` (${awardRes.limitReason})` : '';
+    }
+  } else {
+    rewardMessage = voteCheck.reason ? ` (${voteCheck.reason})` : '';
   }
 
   const voteId = `vote_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
   await db.prepare(`
-    INSERT INTO helpful_votes (id, reply_id, voter_handle, author_handle, created_at)
-    VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-  `).bind(voteId, replyId, voterHandle, authorHandle).run();
+    INSERT INTO helpful_votes (id, reply_id, voter_handle, author_handle, is_rewarded, created_at)
+    VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+  `).bind(voteId, replyId, voterHandle, authorHandle, isRewarded).run();
 
-  const voteCountRow = await db.prepare('SELECT COUNT(*) as count FROM helpful_votes WHERE reply_id = ?')
-    .bind(replyId).first() as any;
-  const voteCount = voteCountRow?.count ?? 1;
+  return c.json({
+    success: true,
+    action: 'voted',
+    pointsAwarded,
+    message: `Marked as helpful${rewardMessage}`,
+  });
+});
 
-  if (voteCount <= 3) {
-    await awardPoints(db, {
-      userHandle: authorHandle,
-      delta: 5,
-      reason: 'Reply marked helpful by a neighbour',
-      refType: 'helpful',
-      refId: `${replyId}_${voterHandle}`,
-      isAction: true,
-    });
+rewardsApp.post('/bazaar/:id/claim', authMiddleware, async (c) => {
+  const user = c.get('user');
+  const clean = (user.userHandle || '').replace(/^@+/, '').trim();
+  const listingId = c.req.param('id');
+  const db = getDatabase(c);
+
+  const listing = await db.prepare('SELECT * FROM bazar_listings WHERE id = ?')
+    .bind(listingId).first() as any;
+
+  if (!listing) {
+    return c.json({ success: false, error: 'Listing not found' }, 404);
   }
 
-  return c.json({ success: true, action: 'voted', message: 'Marked as helpful · +5 pts awarded to author' });
+  const cleanSeller = (listing.seller_handle || '').replace(/^@+/, '').trim();
+  if (cleanSeller !== clean) {
+    return c.json({ success: false, error: 'Unauthorized: you can only claim rewards for your own listings' }, 403);
+  }
+
+  if (listing.is_active !== 1) {
+    return c.json({ success: false, error: 'Deleted or inactive listings are not eligible for rewards' }, 400);
+  }
+
+  if (listing.reward_credited === 1) {
+    return c.json({ success: false, error: 'Listing reward has already been claimed' }, 400);
+  }
+
+  const createdTime = new Date(listing.created_at).getTime();
+  const now = Date.now();
+  if (now - createdTime < 24 * 60 * 60 * 1000) {
+    const hoursLeft = Math.ceil((24 * 60 * 60 * 1000 - (now - createdTime)) / (1000 * 60 * 60));
+    return c.json({ success: false, error: `Listing must be live for 24 hours. ${hoursLeft} hours remaining.` }, 400);
+  }
+
+  if (!listing.title || listing.title.trim().length === 0) {
+    return c.json({ success: false, error: 'Listing must have a title to earn rewards' }, 400);
+  }
+
+  if (!listing.price || Number(listing.price) <= 0) {
+    return c.json({ success: false, error: 'Listing must have a valid price to earn rewards' }, 400);
+  }
+
+  let images: string[] = [];
+  try {
+    images = JSON.parse(listing.image_urls_json || '[]');
+  } catch (_) {}
+
+  if (!Array.isArray(images) || images.length === 0) {
+    return c.json({ success: false, error: 'Listing must include at least one photo to earn rewards' }, 400);
+  }
+
+  const awardRes = await awardPoints(db, {
+    userHandle: clean,
+    delta: 10,
+    reason: 'Listed an item in Bazaar for 24 hours',
+    action: 'bazaar',
+    sourceId: listingId,
+    isAction: true,
+  });
+
+  if (!awardRes.success) {
+    return c.json({ success: false, error: awardRes.limitReason || 'Could not award points' }, 400);
+  }
+
+  await db.prepare('UPDATE bazar_listings SET reward_credited = 1 WHERE id = ?').bind(listingId).run();
+
+  return c.json({
+    success: true,
+    pointsAwarded: awardRes.awardedDelta,
+    newBalance: awardRes.newBalance,
+    message: 'Bazaar listing reward credited: +10 pts',
+  });
+});
+
+rewardsApp.get('/abuse', authMiddleware, async (c) => {
+  const db = getDatabase(c);
+  const rows = await db.prepare(`
+    SELECT * FROM abuse_flags
+    ORDER BY created_at DESC
+    LIMIT 50
+  `).all() as any;
+
+  return c.json({
+    success: true,
+    flags: rows.results || [],
+  });
 });

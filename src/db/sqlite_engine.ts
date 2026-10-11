@@ -199,6 +199,7 @@ CREATE TABLE IF NOT EXISTS bazar_listings (
     views_count INTEGER DEFAULT 0,
     chats_count INTEGER DEFAULT 0,
     is_active INTEGER DEFAULT 1,
+    reward_credited INTEGER DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(seller_handle) REFERENCES users(handle) ON DELETE CASCADE,
     FOREIGN KEY(shop_id) REFERENCES bazar_shops(id) ON DELETE SET NULL
@@ -348,6 +349,8 @@ CREATE TABLE IF NOT EXISTS points_ledger (
     id TEXT PRIMARY KEY,
     user_handle TEXT NOT NULL,
     delta INTEGER NOT NULL,
+    action TEXT DEFAULT '',
+    source_id TEXT DEFAULT '',
     reason TEXT NOT NULL,
     ref_type TEXT NOT NULL,
     ref_id TEXT DEFAULT '',
@@ -356,6 +359,7 @@ CREATE TABLE IF NOT EXISTS points_ledger (
 
 CREATE INDEX IF NOT EXISTS idx_ledger_user ON points_ledger(user_handle, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_ledger_ref ON points_ledger(user_handle, ref_type, ref_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ledger_unique_action_source ON points_ledger(user_handle, action, source_id) WHERE source_id != '';
 
 CREATE TABLE IF NOT EXISTS user_rewards (
     user_handle TEXT PRIMARY KEY,
@@ -367,8 +371,40 @@ CREATE TABLE IF NOT EXISTS user_rewards (
     daily_points_today INTEGER DEFAULT 0,
     daily_date TEXT DEFAULT '',
     referral_code TEXT UNIQUE,
+    consecutive_cap_days INTEGER DEFAULT 0,
+    is_flagged INTEGER DEFAULT 0,
+    flagged_reason TEXT DEFAULT '',
+    timezone_offset REAL DEFAULT 5.5,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS user_daily_rewards (
+    user_handle TEXT NOT NULL,
+    date TEXT NOT NULL,
+    posts_count INTEGER DEFAULT 0,
+    replies_count INTEGER DEFAULT 0,
+    votes_count INTEGER DEFAULT 0,
+    listings_count INTEGER DEFAULT 0,
+    daily_points INTEGER DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(user_handle, date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_daily_rewards_date ON user_daily_rewards(date);
+
+CREATE TABLE IF NOT EXISTS abuse_flags (
+    id TEXT PRIMARY KEY,
+    user_handle TEXT NOT NULL,
+    flag_type TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    details_json TEXT DEFAULT '{}',
+    status TEXT DEFAULT 'pending_review',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_abuse_flags_user ON abuse_flags(user_handle);
+CREATE INDEX IF NOT EXISTS idx_abuse_flags_status ON abuse_flags(status);
 
 CREATE TABLE IF NOT EXISTS user_badges (
     id TEXT PRIMARY KEY,
@@ -385,6 +421,7 @@ CREATE TABLE IF NOT EXISTS helpful_votes (
     reply_id TEXT NOT NULL,
     voter_handle TEXT NOT NULL,
     author_handle TEXT NOT NULL,
+    is_rewarded INTEGER DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(reply_id, voter_handle)
 );
@@ -398,6 +435,8 @@ CREATE TABLE IF NOT EXISTS referrals (
     invitee_handle TEXT NOT NULL,
     code TEXT NOT NULL,
     status TEXT DEFAULT 'pending',
+    device_id TEXT DEFAULT '',
+    invitee_phone TEXT DEFAULT '',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     rewarded_at TIMESTAMP NULL,
     UNIQUE(inviter_handle, invitee_handle)
@@ -550,10 +589,19 @@ export async function ensureSqliteSchema(): Promise<void> {
         'ALTER TABLE feed_posts ADD COLUMN lat REAL',
         'ALTER TABLE feed_posts ADD COLUMN lng REAL',
         'ALTER TABLE devices ADD COLUMN refresh_token_hash TEXT',
-        // 0007_hardening.sql
         'ALTER TABLE devices ADD COLUMN expires_at TIMESTAMP NULL',
         'ALTER TABLE phone_otps ADD COLUMN send_count INTEGER DEFAULT 0',
         'ALTER TABLE phone_otps ADD COLUMN window_started_at TIMESTAMP NULL',
+        'ALTER TABLE points_ledger ADD COLUMN action TEXT DEFAULT ""',
+        'ALTER TABLE points_ledger ADD COLUMN source_id TEXT DEFAULT ""',
+        'ALTER TABLE user_rewards ADD COLUMN consecutive_cap_days INTEGER DEFAULT 0',
+        'ALTER TABLE user_rewards ADD COLUMN is_flagged INTEGER DEFAULT 0',
+        'ALTER TABLE user_rewards ADD COLUMN flagged_reason TEXT DEFAULT ""',
+        'ALTER TABLE user_rewards ADD COLUMN timezone_offset REAL DEFAULT 5.5',
+        'ALTER TABLE helpful_votes ADD COLUMN is_rewarded INTEGER DEFAULT 0',
+        'ALTER TABLE referrals ADD COLUMN device_id TEXT DEFAULT ""',
+        'ALTER TABLE referrals ADD COLUMN invitee_phone TEXT DEFAULT ""',
+        'ALTER TABLE bazar_listings ADD COLUMN reward_credited INTEGER DEFAULT 0',
       ];
 
       for (const m of migrations) {

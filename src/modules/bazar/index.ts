@@ -3,6 +3,7 @@ import { Env, Variables } from '../../types';
 import { authMiddleware } from '../../middleware/auth';
 import { getDatabase } from '../../db/db_context';
 import { awardPoints, checkAndAwardBadges } from '../rewards';
+import { reversePoints } from '../rewards/anti_abuse';
 
 const bazarApp = new Hono<{ Bindings: Env; Variables: Variables }>();
 
@@ -163,51 +164,14 @@ bazarApp.post('/listings', authMiddleware, async (c) => {
   let dailyCapReached = false;
   let newBalance: number | undefined;
 
-  if (finalImages.length > 0) {
-    try {
-      const rewardResult = await awardPoints(db, {
-        userHandle: cleanHandle,
-        delta: 10,
-        reason: 'Listed an item in Bazaar',
-        refType: 'listing',
-        refId: id,
-        isAction: true,
-      });
-      pointsAwarded = rewardResult.awardedDelta;
-      dailyCapReached = rewardResult.capReached ?? false;
-      newBalance = rewardResult.newBalance;
-
-      const pendingRef = await db.prepare("SELECT * FROM referrals WHERE invitee_handle = ? AND status = 'pending'")
-        .bind(cleanHandle).first() as any;
-      if (pendingRef) {
-        await db.prepare("UPDATE referrals SET status = 'rewarded', rewarded_at = CURRENT_TIMESTAMP WHERE id = ?")
-          .bind(pendingRef.id).run();
-        await awardPoints(db, {
-          userHandle: pendingRef.inviter_handle,
-          delta: 25,
-          reason: `Friend @${cleanHandle} listed an item`,
-          refType: 'invite',
-          refId: pendingRef.id,
-          isAction: false,
-        });
-        await awardPoints(db, {
-          userHandle: cleanHandle,
-          delta: 25,
-          reason: 'Listed first item after joining via invite',
-          refType: 'invite',
-          refId: pendingRef.id,
-          isAction: false,
-        });
-      }
-    } catch (_) {}
-  }
-
   return c.json({
     success: true,
     listingId: id,
     pointsAwarded,
     dailyCapReached,
     newBalance,
+    rewardPending: true,
+    rewardMessage: 'Points will be credited after the listing has been live for 24 hours.',
     listing: {
       id,
       seller_handle: cleanHandle,
@@ -279,6 +243,8 @@ bazarApp.delete('/listings/:id', authMiddleware, async (c) => {
   if (res.meta?.changes === 0) {
     return c.json({ success: false, error: 'Listing not found or unauthorized' }, 404);
   }
+
+  await reversePoints(db, id || '', 'bazaar');
 
   return c.json({
     success: true,
