@@ -9,6 +9,7 @@ import {
   checkDuplicateContent,
   checkPostCooldown,
   reversePoints,
+  checkProfanity,
 } from '../rewards/anti_abuse';
 
 const feedApp = new Hono<{ Bindings: Env; Variables: Variables }>();
@@ -109,6 +110,7 @@ async function handleGetPosts(c: any) {
   const areaId = c.req.query('areaId') || c.req.query('area_id');
   const author = c.req.query('author');
   const cursor = c.req.query('cursor');
+  const includeTest = c.req.query('includeTest') === 'true';
 
   let query = `
     SELECT p.*, pr.display_name, pr.avatar_r2_path, pr.is_verified, pr.bio, af.seq AS founder_seq
@@ -117,6 +119,9 @@ async function handleGetPosts(c: any) {
     LEFT JOIN area_founders af ON (LOWER(af.user_id) = LOWER(p.author_handle) OR LOWER(af.user_id) = LOWER(REPLACE(p.author_handle, '@', '')))
     WHERE (p.status = 'active' OR p.status IS NULL OR p.status = '')
   `;
+  if (!includeTest) {
+    query += " AND LOWER(p.content) NOT IN ('test', 'testing', 'asdf', 'test post') AND LOWER(p.content) NOT LIKE '[test]%'";
+  }
   const params: any[] = [];
 
   if (category && category.toUpperCase() !== 'ALL') {
@@ -197,6 +202,11 @@ async function handleCreatePost(c: any) {
 
   if (content.length > 5000) {
     return c.json({ success: false, error: 'Post content exceeds 5000 characters limit' }, 400);
+  }
+
+  const profanity = checkProfanity(content);
+  if (!profanity.valid) {
+    return c.json({ success: false, error: 'Please keep it respectful.' }, 400);
   }
 
   const postId = `post_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`;
@@ -559,16 +569,20 @@ feedApp.post('/posts/:id/like', authMiddleware, handlePostLike);
 // 5. Comments
 async function handleGetComments(c: any) {
   const postId = c.req.param('id');
+  const userHandle = c.req.query('userHandle') || c.req.query('currentUserHandle') || c.get('user')?.userHandle || '';
+  const cleanVoter = userHandle.replace(/^@+/, '').trim();
   const db = getDatabase(c);
   const { results } = await db.prepare(
-    `SELECT c.*, pr.display_name, pr.avatar_r2_path, pr.is_verified, pr.bio, af.seq AS founder_seq
+    `SELECT c.*, pr.display_name, pr.avatar_r2_path, pr.is_verified, pr.bio, af.seq AS founder_seq,
+     (SELECT COUNT(*) FROM helpful_votes hv WHERE hv.reply_id = c.id) AS helpful_votes,
+     (SELECT COUNT(*) FROM helpful_votes hv WHERE hv.reply_id = c.id AND (LOWER(hv.voter_handle) = LOWER(?) OR LOWER(hv.voter_handle) = '@' || LOWER(?) OR '@' || LOWER(hv.voter_handle) = LOWER(?))) AS is_helpful_voted
      FROM feed_comments c
      LEFT JOIN profiles pr ON (LOWER(c.author_handle) = LOWER(pr.handle) OR LOWER(c.author_handle) = '@' || LOWER(pr.handle) OR '@' || LOWER(c.author_handle) = LOWER(pr.handle))
      LEFT JOIN area_founders af ON (LOWER(af.user_id) = LOWER(c.author_handle) OR LOWER(af.user_id) = LOWER(REPLACE(c.author_handle, '@', '')))
      WHERE c.post_id = ?
      ORDER BY c.created_at ASC`
   )
-    .bind(postId)
+    .bind(cleanVoter, cleanVoter, cleanVoter, postId)
     .all();
 
   const formatted = (results || []).map((row: any) => {
@@ -577,6 +591,8 @@ async function handleGetComments(c: any) {
     const isVerified = isFounder || isVerifiedCitizen;
     const authorBadge = isFounder ? `FOUNDING #${row.founder_seq}` : (isVerifiedCitizen ? 'VERIFIED' : null);
     const cleanAuthor = (row.author_handle || '').replace(/^@+/, '').trim();
+    const isHelpful = (row.is_helpful_voted ?? 0) > 0;
+    const helpfulCount = row.helpful_votes ?? 0;
     return {
       ...row,
       authorHandle: cleanAuthor,
@@ -588,6 +604,12 @@ async function handleGetComments(c: any) {
       authorBadge,
       author_badge: authorBadge,
       founderSeq: row.founder_seq ?? null,
+      helpfulVotes: helpfulCount,
+      helpful_votes: helpfulCount,
+      isHelpfulVoted: isHelpful,
+      is_helpful_voted: isHelpful,
+      createdAt: row.created_at,
+      created_at: row.created_at,
     };
   });
 
@@ -612,6 +634,11 @@ async function handleAddComment(c: any) {
 
   if (content.length > 1000) {
     return c.json({ success: false, error: 'Comment cannot exceed 1000 characters' }, 400);
+  }
+
+  const profanity = checkProfanity(content);
+  if (!profanity.valid) {
+    return c.json({ success: false, error: 'Please keep it respectful.' }, 400);
   }
 
   const db = getDatabase(c);

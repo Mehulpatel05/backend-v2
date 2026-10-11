@@ -478,3 +478,21 @@ export async function checkAndFlagDailyCapAbuse(
 
   return false;
 }
+
+const PROFANE_WORDS = new Set([
+  'fuck', 'shit', 'bitch', 'asshole', 'bastard', 'cunt', 'dick', 'pussy',
+  'mc', 'bc', 'bhenchod', 'madarchod', 'chutiya', 'gaand', 'bhosdike',
+  'bhosdi', 'loda', 'lauda', 'chut', 'randi', 'harami', 'kutta', 'kamine',
+  'saala', 'gandu', 'lavde', 'suar', 'hijra', 'tatte', 'chutiye', 'behenchod'
+]);
+
+export function checkProfanity(text: string): { valid: boolean; error?: string } {
+  const normalized = (text || '').toLowerCase().replace(/[^a-z0-9]/g, ' ');
+  const words = normalized.split(/\s+/).filter(w => w.length > 0);
+  for (const word of words) {
+    if (PROFANE_WORDS.has(word)) {
+      return { valid: false, error: 'Please keep it respectful.' };
+    }
+  }
+  return { valid: true };
+}
