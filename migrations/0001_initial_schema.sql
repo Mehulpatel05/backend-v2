@@ -180,6 +180,8 @@ CREATE TABLE IF NOT EXISTS friend_requests (
 
 CREATE TABLE IF NOT EXISTS friendships (
     id TEXT PRIMARY KEY,
+    user1 TEXT NOT NULL DEFAULT '',
+    user2 TEXT NOT NULL DEFAULT '',
     user1_handle TEXT NOT NULL,
     user2_handle TEXT NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,

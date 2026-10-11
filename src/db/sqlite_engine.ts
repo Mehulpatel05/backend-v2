@@ -281,6 +281,8 @@ CREATE TABLE IF NOT EXISTS friend_requests (
 
 CREATE TABLE IF NOT EXISTS friendships (
     id TEXT PRIMARY KEY,
+    user1 TEXT NOT NULL DEFAULT '',
+    user2 TEXT NOT NULL DEFAULT '',
     user1_handle TEXT NOT NULL,
     user2_handle TEXT NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -602,6 +604,8 @@ export async function ensureSqliteSchema(): Promise<void> {
         'ALTER TABLE referrals ADD COLUMN device_id TEXT DEFAULT ""',
         'ALTER TABLE referrals ADD COLUMN invitee_phone TEXT DEFAULT ""',
         'ALTER TABLE bazar_listings ADD COLUMN reward_credited INTEGER DEFAULT 0',
+        'ALTER TABLE friendships ADD COLUMN user1 TEXT NOT NULL DEFAULT ""',
+        'ALTER TABLE friendships ADD COLUMN user2 TEXT NOT NULL DEFAULT ""',
       ];
 
       for (const m of migrations) {

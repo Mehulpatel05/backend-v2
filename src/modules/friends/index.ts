@@ -303,9 +303,9 @@ friendsApp.post('/request', authMiddleware, async (c) => {
     const friendshipId = `friend_${sorted[0]}_${sorted[1]}`;
 
     const insertRes = await db.prepare(
-      `INSERT INTO friendships (id, user1_handle, user2_handle) VALUES (?, ?, ?)
+      `INSERT INTO friendships (id, user1, user2, user1_handle, user2_handle) VALUES (?, ?, ?, ?, ?)
        ON CONFLICT(id) DO NOTHING`
-    ).bind(friendshipId, sorted[0], sorted[1]).run();
+    ).bind(friendshipId, sorted[0], sorted[1], sorted[0], sorted[1]).run();
 
     await db.prepare(
       `UPDATE friend_requests SET status = 'accepted', updated_at = CURRENT_TIMESTAMP
@@ -484,9 +484,9 @@ friendsApp.post('/accept', authMiddleware, async (c) => {
   const friendshipId = `friend_${sorted[0]}_${sorted[1]}`;
 
   const insertRes = await db.prepare(
-    `INSERT INTO friendships (id, user1_handle, user2_handle) VALUES (?, ?, ?)
+    `INSERT INTO friendships (id, user1, user2, user1_handle, user2_handle) VALUES (?, ?, ?, ?, ?)
      ON CONFLICT(id) DO NOTHING`
-  ).bind(friendshipId, sorted[0], sorted[1]).run();
+  ).bind(friendshipId, sorted[0], sorted[1], sorted[0], sorted[1]).run();
 
   await db.prepare(
     `UPDATE friend_requests SET status = 'accepted', updated_at = CURRENT_TIMESTAMP
@@ -580,9 +580,9 @@ friendsApp.post('/request/:id/accept', authMiddleware, async (c) => {
   await db.prepare('UPDATE friend_requests SET status = \'accepted\', updated_at = CURRENT_TIMESTAMP WHERE id = ?').bind(requestId).run();
 
   const insertRes = await db.prepare(
-    `INSERT INTO friendships (id, user1_handle, user2_handle) VALUES (?, ?, ?)
+    `INSERT INTO friendships (id, user1, user2, user1_handle, user2_handle) VALUES (?, ?, ?, ?, ?)
      ON CONFLICT(id) DO NOTHING`
-  ).bind(friendshipId, sorted[0], sorted[1]).run();
+  ).bind(friendshipId, sorted[0], sorted[1], sorted[0], sorted[1]).run();
 
   if (insertRes.meta?.changes === 1) {
     await db.prepare('UPDATE profiles SET friend_count = friend_count + 1 WHERE LOWER(handle) IN (?, ?)').bind(
