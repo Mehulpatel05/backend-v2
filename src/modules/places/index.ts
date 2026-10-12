@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { Env, Variables } from '../../types';
 import { getDatabase } from '../../db/db_context';
 import { getMapsProvider, calculateHaversineDistanceKm } from '../../services/maps';
+import { MASTER_CITIES } from '../../data/master_cities';
 
 const placesApp = new Hono<{ Bindings: Env; Variables: Variables }>();
 
@@ -486,7 +487,7 @@ placesApp.get('/popular', async (c) => {
       WHERE a.city_id = ?
       GROUP BY a.id, a.name, a.city_id, a.lat, a.lng
       ORDER BY user_count DESC, a.name ASC
-      LIMIT 6
+      LIMIT 12
     `).bind(cityId).all()) as any;
 
     const list = popularRows?.results || [];
@@ -498,15 +499,54 @@ placesApp.get('/popular', async (c) => {
         WHERE city_id = ? AND id NOT IN (${list.map(() => '?').join(',') || "''"})
         ORDER BY name ASC
         LIMIT ?
-      `).bind(cityId, ...list.map((r: any) => r.id), 6 - list.length).all()) as any;
+      `).bind(cityId, ...list.map((r: any) => r.id), 12 - list.length).all()) as any;
 
       if (remainingRows?.results?.length) {
         list.push(...remainingRows.results);
       }
     }
 
+    if (list.length < 6) {
+      const masterCity = MASTER_CITIES.find(
+        (m) => m.id.toLowerCase() === cityId.toLowerCase() || m.name.toLowerCase() === cityId.toLowerCase()
+      );
+      if (masterCity && masterCity.areas.length > 0) {
+        const existingNames = new Set(list.map((r: any) => (r.name || '').toLowerCase()));
+        for (const ma of masterCity.areas) {
+          if (!existingNames.has(ma.name.toLowerCase()) && ma.name !== 'Other / Not listed') {
+            list.push({
+              id: ma.id,
+              name: ma.name,
+              city_id: masterCity.id,
+              lat: ma.lat || masterCity.lat,
+              lng: ma.lng || masterCity.lng,
+              user_count: 0,
+            });
+            existingNames.add(ma.name.toLowerCase());
+          }
+          if (list.length >= 12) break;
+        }
+      }
+    }
+
     return c.json({ success: true, areas: list });
   } catch (e: any) {
+    const masterCity = MASTER_CITIES.find(
+      (m) => m.id.toLowerCase() === cityId.toLowerCase() || m.name.toLowerCase() === cityId.toLowerCase()
+    );
+    if (masterCity && masterCity.areas.length > 0) {
+      return c.json({
+        success: true,
+        areas: masterCity.areas.map((a) => ({
+          id: a.id,
+          name: a.name,
+          city_id: masterCity.id,
+          lat: a.lat || masterCity.lat,
+          lng: a.lng || masterCity.lng,
+          user_count: 0,
+        })),
+      });
+    }
     return c.json({ success: true, areas: [] });
   }
 });

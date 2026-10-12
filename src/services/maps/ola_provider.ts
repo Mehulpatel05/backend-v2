@@ -154,31 +154,48 @@ export class OlaMapsProvider implements MapsProvider {
       let detectedCity = '';
       let detectedState = '';
       let detectedCountry = '';
-      let detectedArea = '';
+      let sublocalityL1 = '';
+      let neighborhood = '';
+      let sublocalityL2 = '';
+      let genericSublocality = '';
+      let sublocalityL3 = '';
 
-      if (Array.isArray(first.address_components)) {
-        for (const comp of first.address_components) {
+      for (const res of results) {
+        if (!Array.isArray(res.address_components)) continue;
+        for (const comp of res.address_components) {
           const types: string[] = comp.types || [];
-          if (types.includes('sublocality') || types.includes('neighborhood') || types.includes('sublocality_level_1')) {
-            detectedArea = comp.long_name || comp.short_name || detectedArea;
+          const val = (comp.long_name || comp.short_name || '').trim();
+          if (!val) continue;
+
+          if (types.includes('sublocality_level_1') && !sublocalityL1) {
+            sublocalityL1 = val;
+          } else if (types.includes('neighborhood') && !neighborhood) {
+            neighborhood = val;
+          } else if (types.includes('sublocality_level_2') && !sublocalityL2) {
+            sublocalityL2 = val;
+          } else if (types.includes('sublocality') && !genericSublocality) {
+            genericSublocality = val;
+          } else if (types.includes('sublocality_level_3') && !sublocalityL3) {
+            sublocalityL3 = val;
           }
 
-          if (types.includes('locality') || types.includes('postal_town')) {
-            detectedCity = comp.long_name || comp.short_name || detectedCity;
+          if ((types.includes('locality') || types.includes('postal_town')) && !detectedCity) {
+            detectedCity = val;
           } else if (!detectedCity && types.includes('administrative_area_level_2')) {
-            detectedCity = comp.long_name || comp.short_name || detectedCity;
+            detectedCity = val;
           }
 
-          if (types.includes('administrative_area_level_1')) {
-            detectedState = comp.long_name || comp.short_name || '';
+          if (types.includes('administrative_area_level_1') && !detectedState) {
+            detectedState = val;
           }
 
-          if (types.includes('country')) {
-            detectedCountry = comp.long_name || comp.short_name || '';
+          if (types.includes('country') && !detectedCountry) {
+            detectedCountry = val;
           }
         }
       }
 
+      const detectedArea = sublocalityL1 || neighborhood || sublocalityL2 || genericSublocality || sublocalityL3;
       const formattedAddress = first.formatted_address || '';
       const name = detectedArea || first.name || formattedAddress.split(',')[0].trim() || 'Current Location';
 
