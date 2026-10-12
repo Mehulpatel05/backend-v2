@@ -178,7 +178,35 @@ placesApp.get('/reverse-geocode', async (c) => {
   }
 
   if (matchedCity) {
-    const areaName = reverseResult.name.trim();
+    const masterCity = MASTER_CITIES.find((mc) => mc.id === matchedCity.id);
+    let canonicalMatch: any = null;
+    let minCanonicalDist = Infinity;
+    if (masterCity?.areas) {
+      for (const ma of masterCity.areas) {
+        if (ma.lat && ma.lng) {
+          const dist = calculateHaversineDistanceKm(lat, lng, ma.lat, ma.lng);
+          if (dist < minCanonicalDist) {
+            minCanonicalDist = dist;
+            canonicalMatch = ma;
+          }
+        }
+      }
+    }
+
+    const rawAreaName = reverseResult.name.trim();
+    let areaName = rawAreaName;
+    let finalPlaceId = reverseResult.placeId;
+
+    if (canonicalMatch && minCanonicalDist <= 3.0) {
+      const isRawAlreadyCanonical = masterCity?.areas.some(
+        (ma) => ma.name.toLowerCase() === rawAreaName.toLowerCase()
+      );
+      if (!isRawAlreadyCanonical) {
+        areaName = canonicalMatch.name;
+        finalPlaceId = canonicalMatch.id;
+      }
+    }
+
     const slug = cleanSlug(areaName) || 'AREA';
     const areaId = `${matchedCity.id}-${slug}`;
 
@@ -190,9 +218,9 @@ placesApp.get('/reverse-geocode', async (c) => {
            name = excluded.name,
            lat = excluded.lat,
            lng = excluded.lng`
-      ).bind(areaId, matchedCity.id, areaName, reverseResult.placeId, lat, lng).run();
+      ).bind(areaId, matchedCity.id, areaName, finalPlaceId, lat, lng).run();
 
-      const saved = (await db.prepare('SELECT * FROM areas WHERE place_id = ?').bind(reverseResult.placeId).first()) as any;
+      const saved = (await db.prepare('SELECT * FROM areas WHERE place_id = ?').bind(finalPlaceId).first()) as any;
 
       return c.json({
         success: true,

@@ -195,7 +195,7 @@ export class OlaMapsProvider implements MapsProvider {
         }
       }
 
-      const detectedArea = sublocalityL1 || neighborhood || sublocalityL2 || genericSublocality || sublocalityL3;
+      const detectedArea = sublocalityL1 || genericSublocality || sublocalityL2 || neighborhood || sublocalityL3;
       const formattedAddress = first.formatted_address || '';
       const name = detectedArea || first.name || formattedAddress.split(',')[0].trim() || 'Current Location';
 
