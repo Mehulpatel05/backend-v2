@@ -535,6 +535,34 @@ CREATE TABLE IF NOT EXISTS city_areas (
 );
 
 CREATE INDEX IF NOT EXISTS idx_city_areas_city ON city_areas(city_id);
+
+CREATE TABLE IF NOT EXISTS areas (
+    id TEXT PRIMARY KEY,
+    city_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    place_id TEXT UNIQUE NOT NULL,
+    lat REAL NOT NULL,
+    lng REAL NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(city_id) REFERENCES cities(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_areas_place_id ON areas(place_id);
+CREATE INDEX IF NOT EXISTS idx_areas_city_id ON areas(city_id);
+
+CREATE TABLE IF NOT EXISTS waitlist (
+    id TEXT PRIMARY KEY,
+    city_text TEXT NOT NULL,
+    lat REAL,
+    lng REAL,
+    contact_or_device_id TEXT NOT NULL,
+    status TEXT DEFAULT 'pending',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(contact_or_device_id, city_text)
+);
+
+CREATE INDEX IF NOT EXISTS idx_waitlist_city ON waitlist(city_text, status);
+CREATE INDEX IF NOT EXISTS idx_waitlist_device ON waitlist(contact_or_device_id);
 `;
 
 let schemaInitPromise: Promise<void> | null = null;
@@ -639,8 +667,17 @@ export async function ensureSqliteSchema(): Promise<void> {
         'ALTER TABLE profiles ADD COLUMN home_area_name TEXT DEFAULT ""',
         'ALTER TABLE profiles ADD COLUMN address_note TEXT DEFAULT ""',
         'ALTER TABLE cities ADD COLUMN is_active INTEGER DEFAULT 1',
+        'ALTER TABLE cities ADD COLUMN state TEXT DEFAULT "GJ"',
+        'ALTER TABLE cities ADD COLUMN country TEXT DEFAULT "IN"',
+        'ALTER TABLE cities ADD COLUMN center_lat REAL DEFAULT 22.3072',
+        'ALTER TABLE cities ADD COLUMN center_lng REAL DEFAULT 73.1812',
+        'ALTER TABLE cities ADD COLUMN radius_km REAL DEFAULT 30',
+        'ALTER TABLE cities ADD COLUMN is_enabled INTEGER DEFAULT 1',
         'ALTER TABLE city_areas ADD COLUMN is_active INTEGER DEFAULT 1',
         'ALTER TABLE city_areas ADD COLUMN sort_order INTEGER DEFAULT 0',
+        'ALTER TABLE users ADD COLUMN area_id TEXT DEFAULT ""',
+        'ALTER TABLE users ADD COLUMN city_id TEXT DEFAULT ""',
+        'ALTER TABLE users ADD COLUMN address_note TEXT DEFAULT ""',
       ];
 
       for (const m of migrations) {
@@ -655,13 +692,26 @@ export async function ensureSqliteSchema(): Promise<void> {
       }
 
       try {
+        await client.execute(`
+          UPDATE cities 
+          SET center_lat = COALESCE(NULLIF(lat, 0), 22.3072),
+              center_lng = COALESCE(NULLIF(lng, 0), 73.1812),
+              state = COALESCE(NULLIF(state, ''), COALESCE(NULLIF(state_id, ''), 'GJ')),
+              country = 'IN',
+              radius_km = 30,
+              is_enabled = COALESCE(is_active, 1)
+          WHERE id = 'GJ-VAD'
+        `);
+      } catch (_) {}
+
+      try {
         const cityRows = await client.execute('SELECT COUNT(*) as cnt FROM cities');
         const count = cityRows.rows?.[0]?.cnt ? Number(cityRows.rows[0].cnt) : 0;
         if (count === 0 && MASTER_CITIES.length > 0) {
           const defaultCity = MASTER_CITIES[0];
           await client.execute({
-            sql: 'INSERT OR REPLACE INTO cities (id, name, state_id, lat, lng, pincode, is_active) VALUES (?, ?, ?, ?, ?, ?, 1)',
-            args: [defaultCity.id, defaultCity.name, defaultCity.stateId, defaultCity.lat, defaultCity.lng, defaultCity.pincode],
+            sql: 'INSERT OR REPLACE INTO cities (id, name, state_id, lat, lng, pincode, is_active, state, country, center_lat, center_lng, radius_km, is_enabled) VALUES (?, ?, ?, ?, ?, ?, 1, ?, "IN", ?, ?, 30, 1)',
+            args: [defaultCity.id, defaultCity.name, defaultCity.stateId, defaultCity.lat, defaultCity.lng, defaultCity.pincode, defaultCity.stateId, defaultCity.lat, defaultCity.lng],
           });
           for (let i = 0; i < defaultCity.areas.length; i++) {
             const area = defaultCity.areas[i];
@@ -669,7 +719,19 @@ export async function ensureSqliteSchema(): Promise<void> {
               sql: 'INSERT OR REPLACE INTO city_areas (id, city_id, name, pincode, lat, lng, is_active, sort_order) VALUES (?, ?, ?, ?, ?, ?, 1, ?)',
               args: [area.id, defaultCity.id, area.name, area.pincode || '', area.lat || null, area.lng || null, i],
             });
+            await client.execute({
+              sql: 'INSERT OR REPLACE INTO areas (id, city_id, name, place_id, lat, lng) VALUES (?, ?, ?, ?, ?, ?)',
+              args: [area.id, defaultCity.id, area.name, `seed_${area.id}`, area.lat || 22.3072, area.lng || 73.1812],
+            });
           }
+        } else {
+          try {
+            await client.execute(`
+              INSERT OR IGNORE INTO areas (id, city_id, name, place_id, lat, lng, created_at)
+              SELECT id, city_id, name, 'seed_' || id, COALESCE(lat, 22.3072), COALESCE(lng, 73.1812), created_at
+              FROM city_areas
+            `);
+          } catch (_) {}
         }
       } catch (seedErr) {
         console.error('[SqliteSchema] Failed to seed default city and areas:', seedErr);

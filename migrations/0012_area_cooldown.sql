@@ -1,0 +1,2 @@
+ALTER TABLE profiles ADD COLUMN area_updated_at TIMESTAMP NULL;
+ALTER TABLE users ADD COLUMN area_updated_at TIMESTAMP NULL;

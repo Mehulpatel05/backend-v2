@@ -516,15 +516,18 @@ adminApp.get('/cities', async (c) => {
       SELECT 
         c.id, 
         c.name, 
-        c.state_id as stateId, 
-        c.lat, 
-        c.lng, 
-        c.pincode, 
-        c.is_active as isActive,
+        COALESCE(c.state, c.state_id, 'GJ') as state,
+        COALESCE(c.state_id, c.state, 'GJ') as stateId,
+        COALESCE(c.country, 'IN') as country,
+        COALESCE(c.center_lat, c.lat, 0) as centerLat,
+        COALESCE(c.center_lng, c.lng, 0) as centerLng,
+        COALESCE(c.radius_km, 30) as radiusKm,
+        COALESCE(c.is_enabled, c.is_active, 1) as isEnabled,
+        COALESCE(c.is_active, c.is_enabled, 1) as isActive,
         c.created_at as createdAt,
-        (SELECT COUNT(*) FROM city_areas WHERE city_id = c.id) as areasCount,
-        (SELECT COUNT(*) FROM founding_requests WHERE city_id = c.id AND status = 'pending') as pendingCount,
-        (SELECT COUNT(*) FROM area_founders WHERE area_id LIKE c.id || '%') as approvedCount
+        (SELECT COUNT(*) FROM areas WHERE city_id = c.id) as areasCount,
+        (SELECT COUNT(DISTINCT u.id) FROM users u JOIN areas a ON u.area_id = a.id WHERE a.city_id = c.id) as usersCount,
+        (SELECT COUNT(*) FROM waitlist WHERE LOWER(city_text) = LOWER(c.name)) as waitlistCount
       FROM cities c
       ORDER BY c.name ASC
     `).all();
@@ -536,14 +539,17 @@ adminApp.get('/cities', async (c) => {
         cities: [{
           id: defaultCity.id,
           name: defaultCity.name,
+          state: defaultCity.stateId,
           stateId: defaultCity.stateId,
-          lat: defaultCity.lat,
-          lng: defaultCity.lng,
-          pincode: defaultCity.pincode,
+          country: 'IN',
+          centerLat: defaultCity.lat,
+          centerLng: defaultCity.lng,
+          radiusKm: 30,
+          isEnabled: 1,
           isActive: 1,
           areasCount: defaultCity.areas.length,
-          pendingCount: 0,
-          approvedCount: 0,
+          usersCount: 0,
+          waitlistCount: 0,
         }],
       });
     }
@@ -557,7 +563,10 @@ adminApp.get('/cities', async (c) => {
 adminApp.post('/cities', async (c) => {
   const body = await c.req.json().catch(() => ({}));
   const rawName = (body.name || '').trim();
-  const rawStateId = (body.stateId || body.state_id || 'GJ').trim().toUpperCase();
+  const rawState = (body.state || body.stateId || body.state_id || 'GJ').trim().toUpperCase();
+  const rawCountry = (body.country || 'IN').trim().toUpperCase();
+  const radiusKm = body.radius_km != null ? Number(body.radius_km) : (body.radiusKm != null ? Number(body.radiusKm) : 30);
+  const isEnabled = body.is_enabled !== undefined ? (body.is_enabled ? 1 : 0) : (body.isEnabled !== undefined ? (body.isEnabled ? 1 : 0) : 1);
 
   if (!rawName || rawName.length < 2) {
     return c.json({ success: false, error: 'City name must be at least 2 characters' }, 400);
@@ -574,29 +583,17 @@ adminApp.post('/cities', async (c) => {
       return c.json({ success: false, error: `City '${existing.name}' already exists.` }, 400);
     }
 
+    let lat = Number(body.center_lat ?? body.centerLat ?? body.lat ?? 0);
+    let lng = Number(body.center_lng ?? body.centerLng ?? body.lng ?? 0);
+
     const matchedMaster = findMasterCity(rawName);
-
-    let cityId = '';
-    let cityName = rawName;
-    let stateId = rawStateId;
-    let lat = 0;
-    let lng = 0;
-    let pincode = '';
-    let areasToInsert: Array<{ id: string; name: string; pincode?: string; lat?: number; lng?: number }> = [];
-
-    if (matchedMaster) {
-      cityId = matchedMaster.id;
-      cityName = matchedMaster.name;
-      stateId = matchedMaster.stateId;
+    if ((!lat || !lng) && matchedMaster) {
       lat = matchedMaster.lat;
       lng = matchedMaster.lng;
-      pincode = matchedMaster.pincode;
-      areasToInsert = matchedMaster.areas;
-    } else {
-      const slug = rawName.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 4);
-      cityId = `${stateId}-${slug || Date.now().toString(36).toUpperCase()}`;
-      areasToInsert = generateFallbackAreas(rawName, cityId);
     }
+
+    const slug = rawName.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 4);
+    let cityId = `${rawState}-${slug || Date.now().toString(36).toUpperCase()}`;
 
     const existingById = await db.prepare('SELECT id FROM cities WHERE id = ?').bind(cityId).first();
     if (existingById) {
@@ -604,41 +601,86 @@ adminApp.post('/cities', async (c) => {
     }
 
     await db.prepare(`
-      INSERT INTO cities (id, name, state_id, lat, lng, pincode, is_active, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-    `).bind(cityId, cityName, stateId, lat, lng, pincode).run();
+      INSERT INTO cities (id, name, state, state_id, country, center_lat, center_lng, lat, lng, radius_km, is_enabled, is_active, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+    `).bind(cityId, rawName, rawState, rawState, rawCountry, lat, lng, lat, lng, radiusKm, isEnabled, isEnabled).run();
 
-    for (let i = 0; i < areasToInsert.length; i++) {
-      const area = areasToInsert[i];
-      await db.prepare(`
-        INSERT OR REPLACE INTO city_areas (id, city_id, name, pincode, lat, lng, is_active, sort_order, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, 1, ?, CURRENT_TIMESTAMP)
-      `).bind(
-        area.id,
-        cityId,
-        area.name,
-        area.pincode || '',
-        area.lat || null,
-        area.lng || null,
-        i
-      ).run();
+    if (isEnabled === 1) {
+      try {
+        await db.prepare(
+          "UPDATE waitlist SET status = 'eligible' WHERE LOWER(city_text) = LOWER(?)"
+        ).bind(rawName).run();
+      } catch (_) {}
     }
 
     return c.json({
       success: true,
-      message: `City '${cityName}' added successfully with ${areasToInsert.length} localities.`,
+      message: `City '${rawName}' added successfully.`,
       city: {
         id: cityId,
-        name: cityName,
-        stateId,
-        lat,
-        lng,
-        pincode,
-        isActive: 1,
-        areasCount: areasToInsert.length,
+        name: rawName,
+        state: rawState,
+        country: rawCountry,
+        centerLat: lat,
+        centerLng: lng,
+        radiusKm,
+        isEnabled,
+        areasCount: 0,
+        usersCount: 0,
+        waitlistCount: 0,
       },
-      areasCount: areasToInsert.length,
     });
+  } catch (e: any) {
+    return c.json({ success: false, error: e.message }, 500);
+  }
+});
+
+adminApp.patch('/cities/:id', async (c) => {
+  const cityId = c.req.param('id');
+  const body = await c.req.json().catch(() => ({}));
+  const db = getDatabase(c);
+
+  try {
+    const existing = (await db.prepare('SELECT * FROM cities WHERE id = ?').bind(cityId).first()) as any;
+    if (!existing) {
+      return c.json({ success: false, error: 'City not found' }, 404);
+    }
+
+    const updates: string[] = [];
+    const params: any[] = [];
+
+    if (body.name !== undefined) {
+      updates.push('name = ?');
+      params.push(String(body.name).trim());
+    }
+    if (body.center_lat !== undefined || body.centerLat !== undefined) {
+      const val = Number(body.center_lat ?? body.centerLat);
+      updates.push('center_lat = ?', 'lat = ?');
+      params.push(val, val);
+    }
+    if (body.center_lng !== undefined || body.centerLng !== undefined) {
+      const val = Number(body.center_lng ?? body.centerLng);
+      updates.push('center_lng = ?', 'lng = ?');
+      params.push(val, val);
+    }
+    if (body.radius_km !== undefined || body.radiusKm !== undefined) {
+      const val = Number(body.radius_km ?? body.radiusKm);
+      updates.push('radius_km = ?');
+      params.push(val);
+    }
+    if (body.is_enabled !== undefined || body.isEnabled !== undefined) {
+      const val = (body.is_enabled || body.isEnabled) ? 1 : 0;
+      updates.push('is_enabled = ?', 'is_active = ?');
+      params.push(val, val);
+    }
+
+    if (updates.length > 0) {
+      updates.push('updated_at = CURRENT_TIMESTAMP');
+      params.push(cityId);
+      await db.prepare(`UPDATE cities SET ${updates.join(', ')} WHERE id = ?`).bind(...params).run();
+    }
+
+    return c.json({ success: true, message: 'City updated successfully' });
   } catch (e: any) {
     return c.json({ success: false, error: e.message }, 500);
   }
@@ -649,18 +691,29 @@ adminApp.patch('/cities/:id/toggle', async (c) => {
   const db = getDatabase(c);
 
   try {
-    const city = (await db.prepare('SELECT id, is_active FROM cities WHERE id = ?').bind(cityId).first()) as any;
+    const city = (await db.prepare('SELECT id, name, is_enabled, is_active FROM cities WHERE id = ?').bind(cityId).first()) as any;
     if (!city) {
       return c.json({ success: false, error: 'City not found' }, 404);
     }
 
-    const nextState = city.is_active === 1 ? 0 : 1;
-    await db.prepare('UPDATE cities SET is_active = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
-      .bind(nextState, cityId)
+    const currentState = city.is_enabled ?? city.is_active ?? 1;
+    const nextState = currentState === 1 ? 0 : 1;
+
+    await db.prepare('UPDATE cities SET is_enabled = ?, is_active = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
+      .bind(nextState, nextState, cityId)
       .run();
+
+    if (nextState === 1) {
+      try {
+        await db.prepare(
+          "UPDATE waitlist SET status = 'eligible' WHERE LOWER(city_text) = LOWER(?)"
+        ).bind(city.name).run();
+      } catch (_) {}
+    }
 
     return c.json({
       success: true,
+      isEnabled: nextState,
       isActive: nextState,
       message: `City status changed to ${nextState === 1 ? 'active' : 'disabled'}`,
     });
@@ -669,14 +722,35 @@ adminApp.patch('/cities/:id/toggle', async (c) => {
   }
 });
 
-adminApp.delete('/cities/:id', async (c) => {
-  const cityId = c.req.param('id');
+adminApp.get('/waitlist', async (c) => {
   const db = getDatabase(c);
 
   try {
-    await db.prepare('DELETE FROM city_areas WHERE city_id = ?').bind(cityId).run();
-    await db.prepare('DELETE FROM cities WHERE id = ?').bind(cityId).run();
-    return c.json({ success: true, message: 'City and associated areas deleted' });
+    const summaryRows = (await db.prepare(`
+      SELECT 
+        city_text as cityName,
+        COUNT(*) as totalCount,
+        SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pendingCount,
+        SUM(CASE WHEN status = 'eligible' THEN 1 ELSE 0 END) as eligibleCount,
+        MAX(created_at) as latestRequest,
+        MIN(created_at) as firstRequest
+      FROM waitlist
+      GROUP BY city_text
+      ORDER BY totalCount DESC
+    `).all()) as any;
+
+    const listRows = (await db.prepare(`
+      SELECT id, city_text as cityText, contact_or_device_id as contactId, lat, lng, status, created_at as createdAt
+      FROM waitlist
+      ORDER BY created_at DESC
+      LIMIT 100
+    `).all()) as any;
+
+    return c.json({
+      success: true,
+      summary: summaryRows?.results || [],
+      entries: listRows?.results || [],
+    });
   } catch (e: any) {
     return c.json({ success: false, error: e.message }, 500);
   }
@@ -688,56 +762,34 @@ adminApp.get('/cities/:id/areas', async (c) => {
 
   try {
     const cityRow = (await db.prepare('SELECT name FROM cities WHERE id = ?').bind(cityId).first()) as any;
-    const { results } = await db.prepare(`
+    let { results } = await db.prepare(`
       SELECT 
-        ca.id, 
-        ca.city_id as cityId, 
-        ca.name, 
-        ca.pincode, 
-        ca.lat, 
-        ca.lng, 
-        ca.is_active as isActive,
-        ca.sort_order as sortOrder
-      FROM city_areas ca
-      WHERE ca.city_id = ?
-      ORDER BY ca.sort_order ASC, ca.name ASC
+        id, 
+        city_id as cityId, 
+        name, 
+        place_id as placeId,
+        lat, 
+        lng, 
+        created_at as createdAt
+      FROM areas
+      WHERE city_id = ?
+      ORDER BY name ASC
     `).bind(cityId).all();
+
+    if (!results || results.length === 0) {
+      const fallback = await db.prepare(`
+        SELECT id, city_id as cityId, name, pincode, lat, lng, is_active as isActive, sort_order as sortOrder
+        FROM city_areas
+        WHERE city_id = ?
+        ORDER BY sort_order ASC, name ASC
+      `).bind(cityId).all();
+      results = fallback?.results || [];
+    }
 
     return c.json({
       success: true,
       cityName: cityRow?.name || cityId,
       areas: results || [],
-    });
-  } catch (e: any) {
-    return c.json({ success: false, error: e.message }, 500);
-  }
-});
-
-adminApp.post('/cities/:id/areas', async (c) => {
-  const cityId = c.req.param('id');
-  const body = await c.req.json().catch(() => ({}));
-  const name = (body.name || '').trim();
-  const pincode = (body.pincode || '').trim();
-
-  if (!name) {
-    return c.json({ success: false, error: 'Area name is required' }, 400);
-  }
-
-  const db = getDatabase(c);
-
-  try {
-    const slug = name.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8);
-    const areaId = `${cityId}-${slug || Date.now().toString(36).toUpperCase()}`;
-
-    await db.prepare(`
-      INSERT OR REPLACE INTO city_areas (id, city_id, name, pincode, is_active, sort_order, created_at)
-      VALUES (?, ?, ?, ?, 1, 999, CURRENT_TIMESTAMP)
-    `).bind(areaId, cityId, name, pincode).run();
-
-    return c.json({
-      success: true,
-      area: { id: areaId, cityId, name, pincode, isActive: 1 },
-      message: `Area '${name}' added successfully.`,
     });
   } catch (e: any) {
     return c.json({ success: false, error: e.message }, 500);

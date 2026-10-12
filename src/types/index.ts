@@ -3,6 +3,12 @@ export interface Env {
   MEDIA_BUCKET: R2Bucket;
   ENVIRONMENT: string;
   JWT_SECRET: string;
+  OLA_MAPS_API_KEY?: string;
+  OLA_MAPS_PROJECT_ID?: string;
+  OLA_MAPS_CLIENT_ID?: string;
+  OLA_MAPS_CLIENT_SECRET?: string;
+  MAPS_PROVIDER?: string;
+  GOOGLE_MAPS_API_KEY?: string;
 }
 
 export interface UserContext {

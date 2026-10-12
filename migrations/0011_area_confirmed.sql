@@ -1,0 +1,2 @@
+ALTER TABLE users ADD COLUMN area_confirmed INTEGER DEFAULT 1;
+ALTER TABLE profiles ADD COLUMN area_confirmed INTEGER DEFAULT 1;

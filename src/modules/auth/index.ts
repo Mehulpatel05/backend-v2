@@ -350,6 +350,22 @@ async function handleVerifyOtp(c: any) {
     return c.json({ success: false, error: 'Could not start your session. Please try again.' }, 500);
   }
 
+  const userRow = (await db.prepare('SELECT city_id, area_id, area_confirmed FROM users WHERE id = ?').bind(userId).first()) as any;
+  const profileRow = (await db.prepare('SELECT display_name, home_city_id, home_area_id, home_area_name, area_confirmed FROM profiles WHERE LOWER(handle) = LOWER(?)').bind(handle).first()) as any;
+
+  let cityStatus = 'active';
+  let cityMessage = '';
+  const userCityId = userRow?.city_id || profileRow?.home_city_id;
+  if (userCityId) {
+    const cityRow = (await db.prepare('SELECT id, name, is_enabled, is_active FROM cities WHERE id = ?').bind(userCityId).first()) as any;
+    if (cityRow && cityRow.is_enabled !== 1 && cityRow.is_active !== 1) {
+      cityStatus = 'paused';
+      cityMessage = `Nearhood services in ${cityRow.name} are currently paused, but your account and profile data are completely safe.`;
+    }
+  }
+
+  const isAreaConfirmed = (userRow?.area_confirmed ?? profileRow?.area_confirmed ?? 1) === 1;
+
   return c.json({
     success: true,
     access_token: sessionToken,
@@ -361,7 +377,17 @@ async function handleVerifyOtp(c: any) {
       phoneNumber: e164,
       handle,
       isNewUser,
+      displayName: profileRow?.display_name || '',
+      cityId: userCityId || 'GJ-VAD',
+      areaId: userRow?.area_id || profileRow?.home_area_id || '',
+      areaName: profileRow?.home_area_name || '',
+      areaConfirmed: isAreaConfirmed,
+      cityStatus,
+      cityMessage,
     },
+    city_status: cityStatus,
+    city_message: cityMessage,
+    area_confirmed: isAreaConfirmed ? 1 : 0,
     message: 'Authenticated successfully',
   });
 }
@@ -420,6 +446,69 @@ async function handleClaimHandle(c: any) {
     return c.json({ success: false, error: `Username @${newHandle} is already taken. Please choose another.` }, 409);
   }
 
+  const homeCityId = String(body.home_city_id || body.cityId || body.city_id || 'GJ-VAD').trim();
+  const homeAreaId = String(body.home_area_id || body.areaId || body.area_id || '').trim();
+  const homeAreaName = String(body.home_area_name || body.areaName || body.area_name || '').trim();
+  const addressNote = String(body.address_note || body.addressNote || '').trim();
+
+  if (isInitialClaim && !homeAreaId) {
+    return c.json({ success: false, error: 'Please choose an area to complete your profile setup.' }, 400);
+  }
+
+  let resolvedCityId = homeCityId;
+  let resolvedAreaId = homeAreaId;
+  let resolvedAreaName = homeAreaName;
+
+  if (homeAreaId) {
+    const areaRow = (await db.prepare(
+      `SELECT a.id, a.name, a.city_id, c.is_enabled, c.is_active, c.name as city_name
+       FROM areas a
+       JOIN cities c ON c.id = a.city_id
+       WHERE a.id = ? OR LOWER(a.name) = LOWER(?)`
+    ).bind(homeAreaId, homeAreaId).first()) as any;
+
+    if (!areaRow) {
+      const fallbackRow = (await db.prepare(
+        `SELECT ca.id, ca.name, ca.city_id, c.is_enabled, c.is_active, c.name as city_name
+         FROM city_areas ca
+         JOIN cities c ON c.id = ca.city_id
+         WHERE ca.id = ? OR LOWER(ca.name) = LOWER(?)`
+      ).bind(homeAreaId, homeAreaId).first()) as any;
+
+      if (!fallbackRow) {
+        return c.json({ success: false, error: 'The selected area does not exist. Please choose an area from the search list.' }, 400);
+      }
+      const isEnabled = fallbackRow.is_enabled ?? fallbackRow.is_active ?? 0;
+      if (isEnabled !== 1) {
+        return c.json({ success: false, error: `Nearhood is not yet live in ${fallbackRow.city_name || 'this city'}.` }, 400);
+      }
+      resolvedCityId = fallbackRow.city_id;
+      resolvedAreaId = fallbackRow.id;
+      resolvedAreaName = fallbackRow.name;
+    } else {
+      const isEnabled = areaRow.is_enabled ?? areaRow.is_active ?? 0;
+      if (isEnabled !== 1) {
+        return c.json({ success: false, error: `Nearhood is not yet live in ${areaRow.city_name || 'this city'}.` }, 400);
+      }
+      resolvedCityId = areaRow.city_id;
+      resolvedAreaId = areaRow.id;
+      resolvedAreaName = areaRow.name;
+    }
+  }
+
+  if (resolvedCityId) {
+    const cityRow = (await db.prepare(
+      'SELECT id, name, is_enabled, is_active FROM cities WHERE id = ? LIMIT 1'
+    ).bind(resolvedCityId).first()) as any;
+
+    if (cityRow) {
+      const isCityEnabled = cityRow.is_enabled ?? cityRow.is_active ?? 0;
+      if (isCityEnabled !== 1) {
+        return c.json({ success: false, error: `Nearhood is not yet live in ${cityRow.name || 'this city'}.` }, 400);
+      }
+    }
+  }
+
   try {
     const cascadeUpdates = [
       db.prepare('UPDATE users SET handle = ?, updated_at = CURRENT_TIMESTAMP WHERE LOWER(handle) = LOWER(?) OR LOWER(handle) = LOWER(?)').bind(newHandle, currentUserHandle, `@${currentUserHandle}`),
@@ -452,16 +541,17 @@ async function handleClaimHandle(c: any) {
       );
     }
 
-    const homeCityId = body.home_city_id || body.cityId || body.city_id || 'GJ-VAD';
-    const homeAreaId = body.home_area_id || body.areaId || body.area_id || '';
-    const homeAreaName = body.home_area_name || body.areaName || body.area_name || '';
-    const addressNote = body.address_note || body.addressNote || '';
-
-    if (homeAreaId || homeAreaName || addressNote) {
+    if (resolvedAreaId || resolvedCityId || addressNote) {
       cascadeUpdates.push(
-        db.prepare('UPDATE profiles SET home_city_id = ?, home_area_id = ?, home_area_name = ?, address_note = ? WHERE LOWER(handle) = LOWER(?)')
-          .bind(homeCityId, homeAreaId, homeAreaName, addressNote, newHandle)
+        db.prepare('UPDATE profiles SET home_city_id = ?, home_area_id = ?, home_area_name = ?, address_note = ?, area_confirmed = 1 WHERE LOWER(handle) = LOWER(?)')
+          .bind(resolvedCityId, resolvedAreaId, resolvedAreaName, addressNote, newHandle)
       );
+      try {
+        cascadeUpdates.push(
+          db.prepare('UPDATE users SET area_id = ?, city_id = ?, address_note = ?, area_confirmed = 1 WHERE LOWER(handle) = LOWER(?) OR LOWER(handle) = LOWER(?)')
+            .bind(resolvedAreaId, resolvedCityId, addressNote, newHandle, currentUserHandle)
+        );
+      } catch (_) {}
     }
     await Promise.allSettled(cascadeUpdates.map((s) => s.run()));
 
@@ -562,6 +652,84 @@ async function handleClaimHandle(c: any) {
 authApp.post('/claim-handle', authMiddleware, handleClaimHandle);
 authApp.post('/handle/claim', authMiddleware, handleClaimHandle);
 authApp.post('/profile/handle', authMiddleware, handleClaimHandle);
+
+async function handleConfirmArea(c: any) {
+  const user = c.get('user');
+  const body = await c.req.json().catch(() => ({}));
+  const db = getDatabase(c);
+  const currentUserHandle = (user.userHandle || '').replace(/^@+/, '').trim().toLowerCase();
+
+  const newAreaId = (body.area_id || body.areaId || '').trim();
+  const addressNote = (body.address_note || body.addressNote || '').trim();
+
+  const userRow = (await db.prepare('SELECT city_id, area_id, area_confirmed, area_updated_at FROM users WHERE LOWER(handle) = LOWER(?) OR LOWER(handle) = LOWER(?) LIMIT 1')
+    .bind(currentUserHandle, `@${currentUserHandle}`)
+    .first()) as any;
+
+  const profileRow = (await db.prepare('SELECT home_city_id, home_area_id, home_area_name, area_confirmed, area_updated_at FROM profiles WHERE LOWER(handle) = LOWER(?) OR LOWER(handle) = LOWER(?) LIMIT 1')
+    .bind(currentUserHandle, `@${currentUserHandle}`)
+    .first()) as any;
+
+  if (newAreaId) {
+    const areaRow = (await db.prepare(
+      `SELECT a.id, a.name, a.city_id, c.is_enabled, c.is_active, c.name as city_name
+       FROM areas a
+       JOIN cities c ON c.id = a.city_id
+       WHERE a.id = ?`
+    ).bind(newAreaId).first()) as any;
+
+    if (!areaRow || (areaRow.is_enabled !== 1 && areaRow.is_active !== 1)) {
+      return c.json({ success: false, error: 'The selected area is not valid or not yet live.' }, 400);
+    }
+
+    const isInitialConfirmation = (userRow?.area_confirmed ?? profileRow?.area_confirmed ?? 1) === 0;
+    const lastAreaUpdate = profileRow?.area_updated_at || userRow?.area_updated_at;
+
+    if (!isInitialConfirmation && lastAreaUpdate) {
+      const areaCooldownMs = 30 * 24 * 60 * 60 * 1000;
+      const elapsed = Date.now() - new Date(lastAreaUpdate).getTime();
+      if (!isNaN(elapsed) && elapsed < areaCooldownMs) {
+        const daysRemaining = Math.max(1, Math.ceil((areaCooldownMs - elapsed) / (24 * 60 * 60 * 1000)));
+        return c.json({
+          success: false,
+          code: 'AREA_COOLDOWN',
+          daysRemaining,
+          error: `Area can only be changed once every 30 days. You can change it again in ${daysRemaining} day(s).`,
+        }, 400);
+      }
+    }
+
+    await db.batch([
+      db.prepare('UPDATE users SET area_id = ?, city_id = ?, area_confirmed = 1, address_note = ?, area_updated_at = CURRENT_TIMESTAMP WHERE LOWER(handle) = LOWER(?) OR LOWER(handle) = LOWER(?)')
+        .bind(areaRow.id, areaRow.city_id, addressNote, currentUserHandle, `@${currentUserHandle}`),
+      db.prepare('UPDATE profiles SET home_area_id = ?, home_city_id = ?, home_area_name = ?, area_confirmed = 1, address_note = ?, area_updated_at = CURRENT_TIMESTAMP WHERE LOWER(handle) = LOWER(?) OR LOWER(handle) = LOWER(?)')
+        .bind(areaRow.id, areaRow.city_id, areaRow.name, addressNote, currentUserHandle, `@${currentUserHandle}`),
+    ]);
+
+    return c.json({
+      success: true,
+      message: 'Area updated and confirmed successfully.',
+      area_confirmed: 1,
+      area: { id: areaRow.id, name: areaRow.name, city_id: areaRow.city_id },
+    });
+  }
+
+  await db.batch([
+    db.prepare('UPDATE users SET area_confirmed = 1 WHERE LOWER(handle) = LOWER(?) OR LOWER(handle) = LOWER(?)')
+      .bind(currentUserHandle, `@${currentUserHandle}`),
+    db.prepare('UPDATE profiles SET area_confirmed = 1 WHERE LOWER(handle) = LOWER(?) OR LOWER(handle) = LOWER(?)')
+      .bind(currentUserHandle, `@${currentUserHandle}`),
+  ]);
+
+  return c.json({
+    success: true,
+    message: 'Area confirmed successfully.',
+    area_confirmed: 1,
+  });
+}
+
+authApp.post('/confirm-area', authMiddleware, handleConfirmArea);
+authApp.post('/area/confirm', authMiddleware, handleConfirmArea);
 
 // Check Handle Available
 authApp.get('/check-handle', async (c) => {
@@ -699,17 +867,22 @@ authApp.get('/profile', authMiddleware, async (c) => {
 
   const nameElapsed = profile?.name_updated_at ? Date.now() - new Date(profile.name_updated_at).getTime() : Infinity;
   const handleElapsed = profile?.handle_updated_at ? Date.now() - new Date(profile.handle_updated_at).getTime() : Infinity;
+  const areaElapsed = profile?.area_updated_at ? Date.now() - new Date(profile.area_updated_at).getTime() : Infinity;
   const nameCooldownMs = 14 * 24 * 60 * 60 * 1000;
   const handleCooldownMs = 30 * 24 * 60 * 60 * 1000;
+  const areaCooldownMs = 30 * 24 * 60 * 60 * 1000;
 
   const canChangeName = !profile?.name_updated_at || isNaN(nameElapsed) || nameElapsed >= nameCooldownMs;
   const canChangeHandle = !profile?.handle_updated_at || isNaN(handleElapsed) || handleElapsed >= handleCooldownMs;
+  const canChangeArea = (profile?.area_confirmed ?? 1) === 0 || !profile?.area_updated_at || isNaN(areaElapsed) || areaElapsed >= areaCooldownMs;
 
   const nameDaysRemaining = canChangeName ? 0 : Math.max(1, Math.ceil((nameCooldownMs - nameElapsed) / (24 * 60 * 60 * 1000)));
   const handleDaysRemaining = canChangeHandle ? 0 : Math.max(1, Math.ceil((handleCooldownMs - handleElapsed) / (24 * 60 * 60 * 1000)));
+  const areaDaysRemaining = canChangeArea ? 0 : Math.max(1, Math.ceil((areaCooldownMs - areaElapsed) / (24 * 60 * 60 * 1000)));
 
   const nextNameChangeAt = canChangeName ? null : new Date(new Date(profile.name_updated_at).getTime() + nameCooldownMs).toISOString();
   const nextHandleChangeAt = canChangeHandle ? null : new Date(new Date(profile.handle_updated_at).getTime() + handleCooldownMs).toISOString();
+  const nextAreaChangeAt = canChangeArea ? null : new Date(new Date(profile.area_updated_at).getTime() + areaCooldownMs).toISOString();
 
   return c.json({
     success: true,
@@ -729,6 +902,8 @@ authApp.get('/profile', authMiddleware, async (c) => {
       name_updated_at: profile?.name_updated_at || null,
       handleUpdatedAt: profile?.handle_updated_at || null,
       handle_updated_at: profile?.handle_updated_at || null,
+      areaUpdatedAt: profile?.area_updated_at || null,
+      area_updated_at: profile?.area_updated_at || null,
       canChangeName,
       can_change_name: canChangeName,
       nameDaysRemaining,
@@ -741,6 +916,12 @@ authApp.get('/profile', authMiddleware, async (c) => {
       handle_days_remaining: handleDaysRemaining,
       nextHandleChangeAt,
       next_handle_change_at: nextHandleChangeAt,
+      canChangeArea,
+      can_change_area: canChangeArea,
+      areaDaysRemaining,
+      area_days_remaining: areaDaysRemaining,
+      nextAreaChangeAt,
+      next_area_change_at: nextAreaChangeAt,
     },
   });
 });
@@ -836,6 +1017,9 @@ authApp.get('/me', authMiddleware, async (c) => {
   const profile = (await db.prepare('SELECT * FROM profiles WHERE handle = ? OR handle = ? LIMIT 1')
     .bind(cleanHandle, `@${cleanHandle}`)
     .first()) as any;
+  const userRow = (await db.prepare('SELECT city_id, area_id, area_confirmed, area_updated_at FROM users WHERE LOWER(handle) = LOWER(?) OR LOWER(handle) = LOWER(?) LIMIT 1')
+    .bind(cleanHandle, `@${cleanHandle}`)
+    .first()) as any;
 
   let safeProfile: any = null;
   if (profile) {
@@ -843,13 +1027,51 @@ authApp.get('/me', authMiddleware, async (c) => {
     safeProfile = rest;
   }
 
+  let cityStatus = 'active';
+  let cityMessage = '';
+  const cityId = userRow?.city_id || profile?.home_city_id;
+  if (cityId) {
+    const cityRow = (await db.prepare('SELECT id, name, is_enabled, is_active FROM cities WHERE id = ?').bind(cityId).first()) as any;
+    if (cityRow && cityRow.is_enabled !== 1 && cityRow.is_active !== 1) {
+      cityStatus = 'paused';
+      cityMessage = `Nearhood services in ${cityRow.name} are currently paused, but your account and profile data are completely safe.`;
+    }
+  }
+
+  const isAreaConfirmed = (userRow?.area_confirmed ?? profile?.area_confirmed ?? 1) === 1;
+  const lastAreaUpdate = profile?.area_updated_at || userRow?.area_updated_at;
+  const areaElapsed = lastAreaUpdate ? Date.now() - new Date(lastAreaUpdate).getTime() : Infinity;
+  const areaCooldownMs = 30 * 24 * 60 * 60 * 1000;
+  const canChangeArea = !isAreaConfirmed || !lastAreaUpdate || isNaN(areaElapsed) || areaElapsed >= areaCooldownMs;
+  const areaDaysRemaining = canChangeArea ? 0 : Math.max(1, Math.ceil((areaCooldownMs - areaElapsed) / (24 * 60 * 60 * 1000)));
+  const nextAreaChangeAt = canChangeArea ? null : new Date(new Date(lastAreaUpdate).getTime() + areaCooldownMs).toISOString();
+
   return c.json({
     success: true,
     user: {
       handle: cleanHandle,
       installationId: user.installationId,
       profile: safeProfile,
+      cityId,
+      areaId: userRow?.area_id || profile?.home_area_id,
+      areaName: profile?.home_area_name,
+      areaConfirmed: isAreaConfirmed,
+      cityStatus,
+      cityMessage,
+      canChangeArea,
+      can_change_area: canChangeArea,
+      areaDaysRemaining,
+      area_days_remaining: areaDaysRemaining,
+      nextAreaChangeAt,
+      next_area_change_at: nextAreaChangeAt,
+      areaUpdatedAt: lastAreaUpdate || null,
+      area_updated_at: lastAreaUpdate || null,
     },
+    city_status: cityStatus,
+    city_message: cityMessage,
+    area_confirmed: isAreaConfirmed ? 1 : 0,
+    can_change_area: canChangeArea,
+    area_days_remaining: areaDaysRemaining,
   });
 });
 

@@ -18,6 +18,7 @@ import { adminApp } from './modules/admin';
 import { rewardsApp } from './modules/rewards';
 import { foundingApp, adminFoundingApp } from './modules/founding';
 import { accountDeletionApp } from './modules/account_deletion';
+import { placesApp, handleWaitlist } from './modules/places';
 import { authMiddleware } from './middleware/auth';
 import { getDatabase } from './db/db_context';
 
@@ -140,6 +141,14 @@ app.route('/api/v2/founding', foundingApp);
 app.route('/founding', foundingApp);
 app.route('/api/v2/admin/founding', adminFoundingApp);
 app.route('/admin/founding', adminFoundingApp);
+
+app.route('/api/v2/places', placesApp);
+app.route('/places', placesApp);
+app.route('/api/v2/areas', placesApp);
+app.route('/areas', placesApp);
+
+app.post('/api/v2/waitlist', handleWaitlist);
+app.post('/waitlist', handleWaitlist);
 
 // 5. Central 404 & Error Handler
 app.notFound((c) => {
