@@ -537,19 +537,20 @@ async function handleClaimHandle(c: any) {
 
     if (newDisplayName) {
       cascadeUpdates.push(
-        db.prepare('UPDATE profiles SET display_name = ? WHERE LOWER(handle) = LOWER(?)').bind(newDisplayName, newHandle)
+        db.prepare('UPDATE profiles SET display_name = ? WHERE LOWER(handle) = LOWER(?) OR LOWER(handle) = LOWER(?) OR LOWER(handle) = LOWER(?)')
+          .bind(newDisplayName, newHandle, currentUserHandle, `@${currentUserHandle}`)
       );
     }
 
     if (resolvedAreaId || resolvedCityId || addressNote) {
       cascadeUpdates.push(
-        db.prepare('UPDATE profiles SET home_city_id = ?, home_area_id = ?, home_area_name = ?, address_note = ?, area_confirmed = 1 WHERE LOWER(handle) = LOWER(?)')
-          .bind(resolvedCityId, resolvedAreaId, resolvedAreaName, addressNote, newHandle)
+        db.prepare('UPDATE profiles SET home_city_id = ?, home_area_id = ?, home_area_name = ?, address_note = ?, area_confirmed = 1 WHERE LOWER(handle) = LOWER(?) OR LOWER(handle) = LOWER(?) OR LOWER(handle) = LOWER(?)')
+          .bind(resolvedCityId, resolvedAreaId, resolvedAreaName, addressNote, newHandle, currentUserHandle, `@${currentUserHandle}`)
       );
       try {
         cascadeUpdates.push(
-          db.prepare('UPDATE users SET area_id = ?, city_id = ?, address_note = ?, area_confirmed = 1 WHERE LOWER(handle) = LOWER(?) OR LOWER(handle) = LOWER(?)')
-            .bind(resolvedAreaId, resolvedCityId, addressNote, newHandle, currentUserHandle)
+          db.prepare('UPDATE users SET area_id = ?, city_id = ?, address_note = ?, area_confirmed = 1 WHERE LOWER(handle) = LOWER(?) OR LOWER(handle) = LOWER(?) OR LOWER(handle) = LOWER(?)')
+            .bind(resolvedAreaId, resolvedCityId, addressNote, newHandle, currentUserHandle, `@${currentUserHandle}`)
         );
       } catch (_) {}
     }
