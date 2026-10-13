@@ -12,3 +12,5 @@ Thumbs.db
 *.db-journal
 *.db-wal
 *.db-shm
+firebase-service-account.json
+*firebase*.json

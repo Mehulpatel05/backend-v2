@@ -3,6 +3,7 @@ import { Env, Variables } from '../../types';
 import { authMiddleware, hashToken, SESSION_TTL_DAYS } from '../../middleware/auth';
 import { getDatabase } from '../../db/db_context';
 import { AppConfig } from '../../utils/config';
+import { WakitService } from '../../services/wakit_service';
 import { Fast2SmsService } from '../../services/fast2sms_service';
 import { orchestrateAccountDeletion } from '../account_deletion';
 
@@ -103,7 +104,33 @@ async function handleSendOtp(c: any) {
   const otpCode = testPhone ? '123456' : Math.floor(100000 + Math.random() * 900000).toString();
   const requestId = `req_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`;
 
-  // Store in database with 5-minute expiry
+  let finalRequestId = requestId;
+  let finalOtpCode = otpCode;
+
+  if (!testPhone) {
+    if (WakitService.isConfigured()) {
+      const wakitRes = await WakitService.sendOtp(e164);
+      if (!wakitRes.success) {
+        return c.json({
+          success: false,
+          error: wakitRes.error || 'Failed to send WhatsApp OTP via Wakit',
+        }, 500);
+      }
+      if (wakitRes.requestId) {
+        finalRequestId = wakitRes.requestId;
+      }
+      finalOtpCode = 'WAKIT';
+    } else if (Fast2SmsService.isConfigured()) {
+      const f2sRes = await Fast2SmsService.sendOtp(tenDigits, otpCode);
+      if (!f2sRes.success) {
+        return c.json({
+          success: false,
+          error: f2sRes.error || 'Failed to send SMS OTP via Fast2SMS',
+        }, 500);
+      }
+    }
+  }
+
   try {
     await db.prepare(
       `INSERT INTO phone_otps (phone, otp_code, request_id, attempts, expires_at, created_at, send_count, window_started_at)
@@ -126,29 +153,16 @@ async function handleSendOtp(c: any) {
            THEN CURRENT_TIMESTAMP
            ELSE phone_otps.window_started_at
          END`
-    ).bind(tenDigits, otpCode, requestId).run();
+    ).bind(tenDigits, finalOtpCode, finalRequestId).run();
   } catch (dbErr) {
-    // A failure here means we cannot verify the OTP later, so do not pretend
-    // the send succeeded.
     console.error('[handleSendOtp] Failed to record OTP in phone_otps table:', dbErr);
     return c.json({ success: false, error: 'Could not start verification. Please try again.' }, 500);
   }
 
-  // Fast2SMS Delivery (bypassed only for explicitly enabled test numbers)
-  if (!testPhone) {
-    const f2sRes = await Fast2SmsService.sendOtp(tenDigits, otpCode);
-    if (!f2sRes.success) {
-      return c.json({
-        success: false,
-        error: f2sRes.error || 'Failed to send SMS OTP via Fast2SMS',
-      }, 500);
-    }
-  }
-
   return c.json({
     success: true,
-    requestId,
-    request_id: requestId,
+    requestId: finalRequestId,
+    request_id: finalRequestId,
     phone: e164,
     phoneNumber: e164,
     expiresIn: 300,
@@ -226,19 +240,33 @@ async function handleVerifyOtp(c: any) {
         return c.json({ success: false, error: 'Invalid or expired OTP' }, 400);
       }
 
-      if (otpRow.otp_code === otp) {
+      if (otpRow.otp_code === 'WAKIT' || (WakitService.isConfigured() && otpRow.request_id)) {
+        const verifyRes = await WakitService.verifyOtp({
+          id: otpRow.request_id || requestId,
+          code: otp,
+          to: e164,
+        });
+
+        if (verifyRes.success && verifyRes.verified) {
+          isValidOtp = true;
+          try {
+            await db.prepare('DELETE FROM phone_otps WHERE phone = ?').bind(tenDigits).run();
+          } catch (_) {}
+        } else {
+          try {
+            await db.prepare('UPDATE phone_otps SET attempts = attempts + 1 WHERE phone = ?').bind(tenDigits).run();
+          } catch (_) {}
+          return c.json({ success: false, error: verifyRes.error || 'Invalid or expired OTP' }, 400);
+        }
+      } else if (otpRow.otp_code === otp) {
         isValidOtp = true;
         try {
           await db.prepare('DELETE FROM phone_otps WHERE phone = ?').bind(tenDigits).run();
-        } catch (err) {
-          console.warn('[handleVerifyOtp] Failed to clear consumed OTP:', err);
-        }
+        } catch (_) {}
       } else {
         try {
           await db.prepare('UPDATE phone_otps SET attempts = attempts + 1 WHERE phone = ?').bind(tenDigits).run();
-        } catch (err) {
-          console.warn('[handleVerifyOtp] Failed to record failed attempt:', err);
-        }
+        } catch (_) {}
       }
     } catch (dbErr) {
       console.error('[handleVerifyOtp] phone_otps lookup error:', dbErr);

@@ -70,5 +70,11 @@ export const AppConfig = {
   get publicBaseUrl(): string {
     return (process.env.PUBLIC_BASE_URL || '').trim().replace(/\/+$/, '');
   },
+  get wakitApiKey(): string {
+    return (process.env.WAKIT_API_KEY || '').trim();
+  },
+  get wakitBaseUrl(): string {
+    return (process.env.WAKIT_BASE_URL || 'https://wakit.in/api/v1').trim().replace(/\/+$/, '');
+  },
 };
 

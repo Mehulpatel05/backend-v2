@@ -1,3 +1,5 @@
+import fs from 'fs';
+import path from 'path';
 import { initializeApp, getApps, cert } from 'firebase-admin/app';
 import { getMessaging, Message } from 'firebase-admin/messaging';
 
@@ -17,10 +19,32 @@ function initFirebaseAdmin(): boolean {
         credential: cert(serviceAccount),
       });
       isFirebaseInitialized = true;
-      console.log(`[FCM] Firebase Admin successfully initialized for project: ${serviceAccount.project_id}`);
       return true;
     } catch (err) {
       console.error('[FCM] Failed to initialize Firebase Admin SDK from JSON:', err);
+    }
+  }
+
+  const candidatePaths = [
+    process.env.GOOGLE_APPLICATION_CREDENTIALS,
+    path.resolve(process.cwd(), 'firebase-service-account.json'),
+    path.resolve(__dirname, '../../firebase-service-account.json'),
+    path.resolve(__dirname, '../../../firebase-service-account.json'),
+  ].filter(Boolean) as string[];
+
+  for (const p of candidatePaths) {
+    if (fs.existsSync(p)) {
+      try {
+        const fileContent = fs.readFileSync(p, 'utf8');
+        const serviceAccount = JSON.parse(fileContent);
+        initializeApp({
+          credential: cert(serviceAccount),
+        });
+        isFirebaseInitialized = true;
+        return true;
+      } catch (err) {
+        console.error(`[FCM] Failed to initialize Firebase Admin SDK from ${p}:`, err);
+      }
     }
   }
 
@@ -34,14 +58,12 @@ function initFirebaseAdmin(): boolean {
         }),
       });
       isFirebaseInitialized = true;
-      console.log(`[FCM] Firebase Admin successfully initialized for project: ${process.env.FIREBASE_PROJECT_ID}`);
       return true;
     } catch (err) {
       console.error('[FCM] Failed to initialize Firebase Admin SDK from env vars:', err);
     }
   }
 
-  console.warn('[FCM] No valid Firebase credentials found in environment.');
   return false;
 }
 
@@ -69,16 +91,27 @@ export async function sendPushNotification({
   if (!initialized) return false;
 
   try {
-    // 1. Fetch user's registered FCM token from profiles table
     const profile = (await db.prepare(
       'SELECT fcm_token FROM profiles WHERE LOWER(handle) = ? OR LOWER(handle) = ? LIMIT 1'
     )
       .bind(cleanHandle, `@${cleanHandle}`)
       .first()) as { fcm_token?: string } | null;
 
-    const fcmToken = profile?.fcm_token?.trim();
+    let fcmToken = profile?.fcm_token?.trim();
     if (!fcmToken) {
-      console.log(`[FCM] No FCM token found for user @${cleanHandle}`);
+      const userRow = (await db.prepare(
+        'SELECT handle FROM users WHERE LOWER(handle) = ? OR LOWER(handle) = ? LIMIT 1'
+      ).bind(cleanHandle, `@${cleanHandle}`).first()) as any;
+      if (userRow?.handle) {
+        const altHandle = userRow.handle.replace(/^@+/, '').trim().toLowerCase();
+        const altProfile = (await db.prepare(
+          'SELECT fcm_token FROM profiles WHERE LOWER(handle) = ? OR LOWER(handle) = ? LIMIT 1'
+        ).bind(altHandle, `@${altHandle}`).first()) as any;
+        fcmToken = altProfile?.fcm_token?.trim();
+      }
+    }
+
+    if (!fcmToken) {
       return false;
     }
 
@@ -121,26 +154,35 @@ export async function sendPushNotification({
           channelId: channelId || 'nearhood_channel',
           sound: 'default',
           priority: 'max',
+          defaultSound: true,
+          defaultVibrateTimings: true,
+        },
+      },
+      apns: {
+        payload: {
+          aps: {
+            alert: {
+              title: effectiveTitle,
+              body: effectiveBody,
+            },
+            sound: 'default',
+            badge: 1,
+          },
         },
       },
     };
 
-    const response = await getMessaging().send(message);
-    console.log(`[FCM] Successfully sent push to @${cleanHandle}: ${response}`);
+    await getMessaging().send(message);
     return true;
   } catch (error: any) {
-    console.error(`[FCM] Error sending push to @${cleanHandle}:`, error?.message || error);
-
-    // If token is invalid or unregistered, clean it up from profiles to prevent future failures
     if (
       error.code === 'messaging/registration-token-not-registered' ||
       error.code === 'messaging/invalid-registration-token'
     ) {
       try {
-        await db.prepare('UPDATE profiles SET fcm_token = "" WHERE LOWER(handle) = ?')
-          .bind(cleanHandle)
+        await db.prepare('UPDATE profiles SET fcm_token = "" WHERE LOWER(handle) = ? OR LOWER(handle) = ?')
+          .bind(cleanHandle, `@${cleanHandle}`)
           .run();
-        console.log(`[FCM] Cleared stale token for @${cleanHandle}`);
       } catch (_) {}
     }
     return false;

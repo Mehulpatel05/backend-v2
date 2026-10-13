@@ -65,18 +65,21 @@ app.get('/', (c) => {
 app.get('/health', healthHandler);
 app.get('/api/v2/health', healthHandler);
 
-// 3. User FCM Push Token Registration
 const handleFcmToken = async (c: any) => {
   const user = c.get('user');
   const body = await c.req.json().catch(() => ({}));
   const fcmToken = body.fcm_token || body.fcmToken || body.token || '';
+  const bodyHandle = (body.handle || '').replace(/^@+/, '').trim().toLowerCase();
+  const sessionHandle = (user?.userHandle || '').replace(/^@+/, '').trim().toLowerCase();
+  const handles = Array.from(new Set([sessionHandle, bodyHandle].filter(Boolean)));
   const db = getDatabase(c);
 
   try {
-    const clean = (user.userHandle || '').replace(/^@+/, '').trim().toLowerCase();
-    await db.prepare('UPDATE profiles SET fcm_token = ?, updated_at = CURRENT_TIMESTAMP WHERE LOWER(handle) = ? OR LOWER(handle) = ?')
-      .bind(fcmToken, clean, `@${clean}`)
-      .run();
+    for (const h of handles) {
+      await db.prepare('UPDATE profiles SET fcm_token = ?, updated_at = CURRENT_TIMESTAMP WHERE LOWER(handle) = ? OR LOWER(handle) = ?')
+        .bind(fcmToken, h, `@${h}`)
+        .run();
+    }
   } catch (_) {}
 
   return c.json({ success: true, message: 'FCM token registered successfully' });
