@@ -115,42 +115,68 @@ actionsApp.post('/states/batch', authMiddleware, async (c) => {
   return c.json({ success: true, states: {} });
 });
 
-// 4. Counters
 actionsApp.get('/counters', async (c) => {
   const authHeader = c.req.header('Authorization');
+  const queryHandle = (c.req.query('handle') || '').replace(/^@+/, '').trim().toLowerCase();
   let unreadNotifications = 0;
   let unreadChats = 0;
   let pendingFriends = 0;
 
-  if (authHeader && authHeader.startsWith('Bearer ')) {
-    try {
+  try {
+    const db = getDatabase(c);
+    let devHandle = '';
+    if (authHeader && authHeader.startsWith('Bearer ')) {
       const token = authHeader.replace('Bearer ', '').trim();
       const tokenHash = await hashToken(token);
-      const db = getDatabase(c);
       const dev = (await db.prepare('SELECT user_handle FROM devices WHERE token_hash = ? AND revoked_at IS NULL LIMIT 1').bind(tokenHash).first()) as any;
       if (dev?.user_handle) {
-        const h = dev.user_handle.replace(/^@+/, '').trim().toLowerCase();
-        const notifRow = (await db.prepare('SELECT COUNT(*) as cnt FROM notifications WHERE (LOWER(target_handle) = ? OR LOWER(target_handle) = ?) AND is_read = 0 AND type NOT IN (\'chat\', \'message\', \'call\')').bind(h, `@${h}`).first()) as any;
-        unreadNotifications = notifRow?.cnt || 0;
-
-        const chatRow = (await db.prepare('SELECT SUM(CASE WHEN LOWER(user1_handle) = ? THEN unread_count_user1 ELSE unread_count_user2 END) as cnt FROM chats WHERE LOWER(user1_handle) = ? OR LOWER(user2_handle) = ?').bind(h, h, h).first()) as any;
-        unreadChats = chatRow?.cnt || 0;
-
-        const reqRow = (await db.prepare('SELECT COUNT(*) as cnt FROM friend_requests WHERE (LOWER(receiver_handle) = ? OR LOWER(receiver_handle) = ?) AND status = "pending"').bind(h, `@${h}`).first()) as any;
-        pendingFriends = reqRow?.cnt || 0;
+        devHandle = dev.user_handle.replace(/^@+/, '').trim().toLowerCase();
       }
-    } catch (_) {}
-  }
+    }
+
+    const handles = Array.from(new Set([devHandle, queryHandle].filter(Boolean)));
+    if (handles.length > 0) {
+      const notifConditions: string[] = [];
+      const notifParams: any[] = [];
+      for (const h of handles) {
+        notifConditions.push('LOWER(target_handle) = ? OR LOWER(target_handle) = ?');
+        notifParams.push(h, `@${h}`);
+      }
+      const notifRow = (await db.prepare(`SELECT COUNT(*) as cnt FROM notifications WHERE (${notifConditions.join(' OR ')}) AND is_read = 0 AND type NOT IN ('chat', 'message', 'call')`).bind(...notifParams).first()) as any;
+      unreadNotifications = notifRow?.cnt || 0;
+
+      const chatConditions: string[] = [];
+      const chatParams: any[] = [];
+      for (const h of handles) {
+        chatConditions.push('LOWER(user1_handle) = ? OR LOWER(user2_handle) = ?');
+        chatParams.push(h, h);
+      }
+      const primaryHandle = handles[0];
+      const chatRow = (await db.prepare(`SELECT SUM(CASE WHEN LOWER(user1_handle) = ? THEN unread_count_user1 ELSE unread_count_user2 END) as cnt FROM chats WHERE ${chatConditions.join(' OR ')}`).bind(primaryHandle, ...chatParams).first()) as any;
+      unreadChats = chatRow?.cnt || 0;
+
+      const reqConditions: string[] = [];
+      const reqParams: any[] = [];
+      for (const h of handles) {
+        reqConditions.push('LOWER(receiver_handle) = ? OR LOWER(receiver_handle) = ?');
+        reqParams.push(h, `@${h}`);
+      }
+      const reqRow = (await db.prepare(`SELECT COUNT(*) as cnt FROM friend_requests WHERE (${reqConditions.join(' OR ')}) AND status = 'pending'`).bind(...reqParams).first()) as any;
+      pendingFriends = reqRow?.cnt || 0;
+    }
+  } catch (_) {}
 
   return c.json({
     success: true,
     counters: {
       unreadNotifications,
       unreadChats,
+      unreadMessages: unreadChats,
       pendingFriends,
     },
     unreadNotifications,
     unreadChats,
+    unreadMessages: unreadChats,
     pendingFriends,
   });
 });

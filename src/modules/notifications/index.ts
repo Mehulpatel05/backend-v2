@@ -8,21 +8,29 @@ const notificationsApp = new Hono<{ Bindings: Env; Variables: Variables }>();
 
 notificationsApp.use('/*', authMiddleware);
 
-// 1. Get User Notifications for current authenticated user
 notificationsApp.get('/', async (c) => {
   const user = c.get('user');
-  const targetHandle = user.userHandle.replace(/^@+/, '').trim().toLowerCase();
+  const sessionHandle = (user?.userHandle || '').replace(/^@+/, '').trim().toLowerCase();
+  const queryHandle = (c.req.query('handle') || '').replace(/^@+/, '').trim().toLowerCase();
+
+  const handles = Array.from(new Set([sessionHandle, queryHandle].filter(Boolean)));
+  if (handles.length === 0) {
+    return c.json({ success: true, notifications: [], count: 0 });
+  }
 
   const limit = Math.min(parseInt(c.req.query('limit') || '50', 10), 100);
   const db = getDatabase(c);
 
-  const { results } = await db.prepare(
-    `SELECT * FROM notifications 
-     WHERE (LOWER(target_handle) = ? OR LOWER(target_handle) = ?)
-     ORDER BY created_at DESC LIMIT ?`
-  )
-    .bind(targetHandle, `@${targetHandle}`, limit)
-    .all();
+  const conditions: string[] = [];
+  const params: any[] = [];
+  for (const h of handles) {
+    conditions.push('LOWER(target_handle) = ? OR LOWER(target_handle) = ?');
+    params.push(h, `@${h}`);
+  }
+  params.push(limit);
+
+  const query = `SELECT * FROM notifications WHERE (${conditions.join(' OR ')}) ORDER BY created_at DESC LIMIT ?`;
+  const { results } = await db.prepare(query).bind(...params).all();
 
   const formatted = (results || []).map((row: any) => {
     let payload = {};
@@ -145,55 +153,67 @@ notificationsApp.post('/:id/read', async (c) => {
   return c.json({ success: true, message: 'Notification marked as read' });
 });
 
-// 4. Mark All Notifications as Read for authenticated user
 notificationsApp.post('/read-all', async (c) => {
   const user = c.get('user');
-  const myHandle = user.userHandle.replace(/^@+/, '').trim().toLowerCase();
+  const sessionHandle = (user?.userHandle || '').replace(/^@+/, '').trim().toLowerCase();
+  const queryHandle = (c.req.query('handle') || '').replace(/^@+/, '').trim().toLowerCase();
+  const handles = Array.from(new Set([sessionHandle, queryHandle].filter(Boolean)));
   const db = getDatabase(c);
 
-  await db.prepare('UPDATE notifications SET is_read = 1 WHERE (LOWER(target_handle) = ? OR LOWER(target_handle) = ?)')
-    .bind(myHandle, `@${myHandle}`)
-    .run();
+  for (const h of handles) {
+    await db.prepare('UPDATE notifications SET is_read = 1 WHERE (LOWER(target_handle) = ? OR LOWER(target_handle) = ?)')
+      .bind(h, `@${h}`)
+      .run();
+  }
 
   return c.json({ success: true, message: 'All notifications marked as read' });
 });
 
-// 5. Delete a Notification for authenticated user
 notificationsApp.delete('/:id', async (c) => {
   const user = c.get('user');
-  const myHandle = user.userHandle.replace(/^@+/, '').trim().toLowerCase();
+  const sessionHandle = (user?.userHandle || '').replace(/^@+/, '').trim().toLowerCase();
+  const queryHandle = (c.req.query('handle') || '').replace(/^@+/, '').trim().toLowerCase();
+  const handles = Array.from(new Set([sessionHandle, queryHandle].filter(Boolean)));
   const id = c.req.param('id');
   const db = getDatabase(c);
 
-  await db.prepare('DELETE FROM notifications WHERE id = ? AND LOWER(target_handle) = ?')
-    .bind(id, myHandle)
-    .run();
+  for (const h of handles) {
+    await db.prepare('DELETE FROM notifications WHERE id = ? AND (LOWER(target_handle) = ? OR LOWER(target_handle) = ?)')
+      .bind(id, h, `@${h}`)
+      .run();
+  }
 
   return c.json({ success: true, message: 'Notification deleted' });
 });
 
-// 6. Clear All Notifications for authenticated user
 notificationsApp.delete('/', async (c) => {
   const user = c.get('user');
-  const myHandle = user.userHandle.replace(/^@+/, '').trim().toLowerCase();
+  const sessionHandle = (user?.userHandle || '').replace(/^@+/, '').trim().toLowerCase();
+  const queryHandle = (c.req.query('handle') || '').replace(/^@+/, '').trim().toLowerCase();
+  const handles = Array.from(new Set([sessionHandle, queryHandle].filter(Boolean)));
   const db = getDatabase(c);
 
-  await db.prepare('DELETE FROM notifications WHERE LOWER(target_handle) = ?')
-    .bind(myHandle)
-    .run();
+  for (const h of handles) {
+    await db.prepare('DELETE FROM notifications WHERE LOWER(target_handle) = ? OR LOWER(target_handle) = ?')
+      .bind(h, `@${h}`)
+      .run();
+  }
 
   return c.json({ success: true, message: 'All notifications cleared' });
 });
 
-// 7. Clear Read Notifications for authenticated user
 notificationsApp.delete('/clear-read', async (c) => {
   const user = c.get('user');
-  const myHandle = user.userHandle.replace(/^@+/, '').trim().toLowerCase();
+  const sessionHandle = (user?.userHandle || '').replace(/^@+/, '').trim().toLowerCase();
+  const queryHandle = (c.req.query('handle') || '').replace(/^@+/, '').trim().toLowerCase();
+  const handles = Array.from(new Set([sessionHandle, queryHandle].filter(Boolean)));
   const db = getDatabase(c);
 
-  await db.prepare('DELETE FROM notifications WHERE LOWER(target_handle) = ? AND is_read = 1')
-    .bind(myHandle)
-    .run();
+  for (const h of handles) {
+    await db.prepare('DELETE FROM notifications WHERE (LOWER(target_handle) = ? OR LOWER(target_handle) = ?) AND is_read = 1')
+      .bind(h, `@${h}`)
+      .run();
+  }
 
   return c.json({ success: true, message: 'Read notifications cleared' });
 });
