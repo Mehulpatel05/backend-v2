@@ -231,12 +231,19 @@ mediaApp.get('/file/*', async (c) => {
 
       const headers = new Headers();
       if (response.ContentType) headers.set('Content-Type', response.ContentType);
+      if (response.ContentLength !== undefined && response.ContentLength !== null) {
+        headers.set('Content-Length', response.ContentLength.toString());
+      }
+      if (response.ETag) headers.set('ETag', response.ETag);
       headers.set('Cache-Control', 'public, max-age=31536000, immutable');
       headers.set('Access-Control-Allow-Origin', '*');
+      headers.set('Access-Control-Expose-Headers', 'Content-Length, ETag');
       headers.set('X-Content-Type-Options', 'nosniff');
 
-      const stream = response.Body as any;
-      return new Response(stream, { headers });
+      const bytes = typeof (response.Body as any)?.transformToByteArray === 'function'
+        ? await (response.Body as any).transformToByteArray()
+        : (response.Body as any);
+      return new Response(bytes, { headers });
     } catch {
       return c.json({ success: false, error: 'File not found' }, 404);
     }

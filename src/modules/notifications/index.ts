@@ -24,8 +24,8 @@ notificationsApp.get('/', async (c) => {
   const conditions: string[] = [];
   const params: any[] = [];
   for (const h of handles) {
-    conditions.push('LOWER(target_handle) = ? OR LOWER(target_handle) = ?');
-    params.push(h, `@${h}`);
+    conditions.push("LOWER(REPLACE(target_handle, '@', '')) = ?");
+    params.push(h);
   }
   params.push(limit);
 
@@ -139,16 +139,19 @@ notificationsApp.post('/', async (c) => {
   });
 });
 
-// 3. Mark Notification as Read for authenticated user
 notificationsApp.post('/:id/read', async (c) => {
   const user = c.get('user');
-  const myHandle = user.userHandle.replace(/^@+/, '').trim().toLowerCase();
+  const sessionHandle = (user?.userHandle || '').replace(/^@+/, '').trim().toLowerCase();
+  const queryHandle = (c.req.query('handle') || '').replace(/^@+/, '').trim().toLowerCase();
+  const handles = Array.from(new Set([sessionHandle, queryHandle].filter(Boolean)));
   const id = c.req.param('id');
   const db = getDatabase(c);
 
-  await db.prepare('UPDATE notifications SET is_read = 1 WHERE id = ? AND (LOWER(target_handle) = ? OR LOWER(target_handle) = ?)')
-    .bind(id, myHandle, `@${myHandle}`)
-    .run();
+  for (const h of handles) {
+    await db.prepare("UPDATE notifications SET is_read = 1 WHERE id = ? AND LOWER(REPLACE(target_handle, '@', '')) = ?")
+      .bind(id, h)
+      .run();
+  }
 
   return c.json({ success: true, message: 'Notification marked as read' });
 });
@@ -161,8 +164,8 @@ notificationsApp.post('/read-all', async (c) => {
   const db = getDatabase(c);
 
   for (const h of handles) {
-    await db.prepare('UPDATE notifications SET is_read = 1 WHERE (LOWER(target_handle) = ? OR LOWER(target_handle) = ?)')
-      .bind(h, `@${h}`)
+    await db.prepare("UPDATE notifications SET is_read = 1 WHERE LOWER(REPLACE(target_handle, '@', '')) = ?")
+      .bind(h)
       .run();
   }
 

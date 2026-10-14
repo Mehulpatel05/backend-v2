@@ -139,8 +139,8 @@ actionsApp.get('/counters', async (c) => {
       const notifConditions: string[] = [];
       const notifParams: any[] = [];
       for (const h of handles) {
-        notifConditions.push('LOWER(target_handle) = ? OR LOWER(target_handle) = ?');
-        notifParams.push(h, `@${h}`);
+        notifConditions.push("LOWER(REPLACE(target_handle, '@', '')) = ?");
+        notifParams.push(h);
       }
       const notifRow = (await db.prepare(`SELECT COUNT(*) as cnt FROM notifications WHERE (${notifConditions.join(' OR ')}) AND is_read = 0 AND type NOT IN ('chat', 'message', 'call')`).bind(...notifParams).first()) as any;
       unreadNotifications = notifRow?.cnt || 0;
@@ -148,18 +148,18 @@ actionsApp.get('/counters', async (c) => {
       const chatConditions: string[] = [];
       const chatParams: any[] = [];
       for (const h of handles) {
-        chatConditions.push('LOWER(user1_handle) = ? OR LOWER(user2_handle) = ?');
+        chatConditions.push("LOWER(REPLACE(user1_handle, '@', '')) = ? OR LOWER(REPLACE(user2_handle, '@', '')) = ?");
         chatParams.push(h, h);
       }
       const primaryHandle = handles[0];
-      const chatRow = (await db.prepare(`SELECT SUM(CASE WHEN LOWER(user1_handle) = ? THEN unread_count_user1 ELSE unread_count_user2 END) as cnt FROM chats WHERE ${chatConditions.join(' OR ')}`).bind(primaryHandle, ...chatParams).first()) as any;
+      const chatRow = (await db.prepare(`SELECT SUM(CASE WHEN LOWER(REPLACE(user1_handle, '@', '')) = ? THEN COALESCE(unread_count_user1, 0) WHEN LOWER(REPLACE(user2_handle, '@', '')) = ? THEN COALESCE(unread_count_user2, 0) ELSE 0 END) as cnt FROM chats WHERE ${chatConditions.join(' OR ')}`).bind(primaryHandle, primaryHandle, ...chatParams).first()) as any;
       unreadChats = chatRow?.cnt || 0;
 
       const reqConditions: string[] = [];
       const reqParams: any[] = [];
       for (const h of handles) {
-        reqConditions.push('LOWER(receiver_handle) = ? OR LOWER(receiver_handle) = ?');
-        reqParams.push(h, `@${h}`);
+        reqConditions.push("LOWER(REPLACE(receiver_handle, '@', '')) = ?");
+        reqParams.push(h);
       }
       const reqRow = (await db.prepare(`SELECT COUNT(*) as cnt FROM friend_requests WHERE (${reqConditions.join(' OR ')}) AND status = 'pending'`).bind(...reqParams).first()) as any;
       pendingFriends = reqRow?.cnt || 0;

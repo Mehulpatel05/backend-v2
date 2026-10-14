@@ -22,25 +22,25 @@ chatApp.get('/', authMiddleware, async (c) => {
 
   const { results } = await db.prepare(
     `SELECT c.*,
-       COALESCE(pr.display_name, CASE WHEN LOWER(c.user1_handle) = ? THEN c.user2_handle ELSE c.user1_handle END) AS other_display_name,
+       COALESCE(pr.display_name, CASE WHEN LOWER(REPLACE(c.user1_handle, '@', '')) = ? THEN c.user2_handle ELSE c.user1_handle END) AS other_display_name,
        COALESCE(pr.avatar_r2_path, '') AS other_avatar_r2_path,
        pr.is_verified,
        pr.bio,
        af.seq AS founder_seq
      FROM chats c
-     LEFT JOIN profiles pr ON LOWER(
+     LEFT JOIN profiles pr ON LOWER(REPLACE(
        CASE 
-         WHEN LOWER(c.user1_handle) = ? THEN c.user2_handle 
+         WHEN LOWER(REPLACE(c.user1_handle, '@', '')) = ? THEN c.user2_handle 
          ELSE c.user1_handle 
-       END
-     ) = LOWER(pr.handle)
-     LEFT JOIN area_founders af ON LOWER(
+       END, '@', ''
+     )) = LOWER(REPLACE(pr.handle, '@', ''))
+     LEFT JOIN area_founders af ON LOWER(REPLACE(
        CASE 
-         WHEN LOWER(c.user1_handle) = ? THEN c.user2_handle 
+         WHEN LOWER(REPLACE(c.user1_handle, '@', '')) = ? THEN c.user2_handle 
          ELSE c.user1_handle 
-       END
-     ) = LOWER(af.user_id)
-     WHERE LOWER(c.user1_handle) = ? OR LOWER(c.user2_handle) = ?
+       END, '@', ''
+     )) = LOWER(REPLACE(af.user_id, '@', ''))
+     WHERE LOWER(REPLACE(c.user1_handle, '@', '')) = ? OR LOWER(REPLACE(c.user2_handle, '@', '')) = ?
      ORDER BY c.last_timestamp DESC`
   )
     .bind(myHandle, myHandle, myHandle, myHandle, myHandle)
@@ -393,7 +393,11 @@ chatApp.post('/message', authMiddleware, handleSendMessage);
 // 4. Mark Chat Messages as Read
 chatApp.post('/:chatId/read', authMiddleware, async (c) => {
   const user = c.get('user');
-  const myHandle = (user.userHandle || '').replace(/^@+/, '').trim().toLowerCase();
+  const sessionHandle = (user?.userHandle || '').replace(/^@+/, '').trim().toLowerCase();
+  const body = await c.req.json().catch(() => ({}));
+  const bodyHandle = (body.user_handle || body.userHandle || '').replace(/^@+/, '').trim().toLowerCase();
+  const queryHandle = (c.req.query('handle') || '').replace(/^@+/, '').trim().toLowerCase();
+  const myHandle = sessionHandle || bodyHandle || queryHandle;
   const rawChatId = c.req.param('chatId') || '';
   const chatId = rawChatId.replace(/^@+/, '').trim().toLowerCase();
   const db = getDatabase(c);
@@ -401,27 +405,32 @@ chatApp.post('/:chatId/read', authMiddleware, async (c) => {
   const parts = chatId.split('_');
   const isParticipantByNaming = parts.length === 2 && (parts[0] === myHandle || parts[1] === myHandle);
 
-  const chatRow = await db.prepare(
+  const chatRow = (await db.prepare(
     `SELECT canonical_id, user1_handle, user2_handle FROM chats 
      WHERE (LOWER(canonical_id) = ? OR LOWER(id) = ?)
        AND (LOWER(REPLACE(user1_handle, '@', '')) = ? OR LOWER(REPLACE(user2_handle, '@', '')) = ?)
      LIMIT 1`
-  ).bind(chatId, chatId, myHandle, myHandle).first();
+  ).bind(chatId, chatId, myHandle, myHandle).first()) as any;
 
   if (!chatRow && !isParticipantByNaming) {
     return c.json({ success: false, error: 'Forbidden: You are not a participant in this conversation' }, 403);
   }
 
-  const partnerHandle = parts.length === 2 ? (parts[0] === myHandle ? parts[1] : parts[0]) : '';
+  let partnerHandle = parts.length === 2 ? (parts[0] === myHandle ? parts[1] : parts[0]) : '';
+  if (!partnerHandle && chatRow) {
+    const u1 = (chatRow.user1_handle || '').replace(/^@+/, '').trim().toLowerCase();
+    const u2 = (chatRow.user2_handle || '').replace(/^@+/, '').trim().toLowerCase();
+    partnerHandle = u1 === myHandle ? u2 : u1;
+  }
 
   const batchQueries: any[] = [
     db.prepare(
-      'UPDATE chat_messages SET is_read = 1 WHERE LOWER(chat_id) = ? AND LOWER(receiver_handle) = ?'
-    ).bind(chatId, myHandle),
+      "UPDATE chat_messages SET is_read = 1 WHERE (LOWER(chat_id) = ? OR LOWER(chat_id) = ?) AND LOWER(REPLACE(receiver_handle, '@', '')) = ?"
+    ).bind(chatId, chatRow?.canonical_id || chatId, myHandle),
     db.prepare(
       `UPDATE chats SET
-       unread_count_user1 = CASE WHEN LOWER(user1_handle) = ? THEN 0 ELSE unread_count_user1 END,
-       unread_count_user2 = CASE WHEN LOWER(user2_handle) = ? THEN 0 ELSE unread_count_user2 END
+       unread_count_user1 = CASE WHEN LOWER(REPLACE(user1_handle, '@', '')) = ? THEN 0 ELSE unread_count_user1 END,
+       unread_count_user2 = CASE WHEN LOWER(REPLACE(user2_handle, '@', '')) = ? THEN 0 ELSE unread_count_user2 END
        WHERE LOWER(canonical_id) = ? OR LOWER(id) = ?`
     ).bind(myHandle, myHandle, chatId, chatId),
   ];
@@ -430,10 +439,10 @@ chatApp.post('/:chatId/read', authMiddleware, async (c) => {
     batchQueries.push(
       db.prepare(
         `UPDATE notifications SET is_read = 1
-         WHERE (LOWER(target_handle) = ? OR LOWER(target_handle) = ?)
-           AND type = 'chat'
-           AND (LOWER(sender_handle) = ? OR LOWER(sender_handle) = ?)`
-      ).bind(myHandle, `@${myHandle}`, partnerHandle, `@${partnerHandle}`)
+         WHERE LOWER(REPLACE(target_handle, '@', '')) = ?
+           AND type IN ('chat', 'message')
+           AND LOWER(REPLACE(sender_handle, '@', '')) = ?`
+      ).bind(myHandle, partnerHandle)
     );
   }
 
