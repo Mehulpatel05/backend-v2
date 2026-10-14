@@ -28,7 +28,147 @@ function calculateCooldown(updatedAt: string | null | undefined, cooldownMs: num
   return { canChange: false, daysRemaining, nextAvailableAt };
 }
 
-// 1. Get Profile by Handle
+profileApp.get('/area-change-request/status', authMiddleware, async (c) => {
+  const user = c.get('user');
+  const handle = (user?.userHandle || '').replace(/^@+/, '').trim().toLowerCase();
+  const db = getDatabase(c);
+
+  const profile = (await db.prepare(
+    `SELECT home_city_id, home_area_id, home_area_name FROM profiles WHERE LOWER(handle) = LOWER(?) OR LOWER(handle) = LOWER(?) LIMIT 1`
+  ).bind(handle, `@${handle}`).first()) as any;
+
+  const pendingRequest = (await db.prepare(
+    `SELECT * FROM area_change_requests 
+     WHERE (LOWER(user_handle) = LOWER(?) OR LOWER(user_handle) = LOWER(?)) 
+       AND status = 'pending' 
+     ORDER BY created_at DESC LIMIT 1`
+  ).bind(handle, `@${handle}`).first()) as any;
+
+  return c.json({
+    success: true,
+    hasPending: !!pendingRequest,
+    request: pendingRequest || null,
+    currentArea: {
+      cityId: profile?.home_city_id || 'GJ-VAD',
+      areaId: profile?.home_area_id || '',
+      areaName: profile?.home_area_name || '',
+    },
+  });
+});
+
+profileApp.post('/area-change-request', authMiddleware, async (c) => {
+  const user = c.get('user');
+  const handle = (user?.userHandle || '').replace(/^@+/, '').trim().toLowerCase();
+  const body = await c.req.json().catch(() => ({}));
+  const db = getDatabase(c);
+
+  const requestedAreaId = (body.requested_area_id || body.requestedAreaId || body.area_id || '').trim();
+  const requestedAreaName = (body.requested_area_name || body.requestedAreaName || body.area_name || '').trim();
+  const requestedCityId = (body.requested_city_id || body.requestedCityId || body.city_id || 'GJ-VAD').trim();
+  const reason = (body.reason || '').trim();
+
+  if (!requestedAreaId) {
+    return c.json({ success: false, error: 'Please select a valid area.' }, 400);
+  }
+
+  const existingPending = (await db.prepare(
+    `SELECT id FROM area_change_requests WHERE (LOWER(user_handle) = LOWER(?) OR LOWER(user_handle) = LOWER(?)) AND status = 'pending' LIMIT 1`
+  ).bind(handle, `@${handle}`).first()) as any;
+
+  if (existingPending) {
+    return c.json({ success: false, error: 'You already have an area change request pending admin approval.' }, 400);
+  }
+
+  const currentProfile = (await db.prepare(
+    `SELECT home_area_id, home_area_name, home_city_id FROM profiles WHERE LOWER(handle) = LOWER(?) OR LOWER(handle) = LOWER(?) LIMIT 1`
+  ).bind(handle, `@${handle}`).first()) as any;
+
+  if (currentProfile && currentProfile.home_area_id && currentProfile.home_area_id.toLowerCase() === requestedAreaId.toLowerCase()) {
+    return c.json({ success: false, error: 'You are already registered in this area.' }, 400);
+  }
+
+  let resolvedAreaName = requestedAreaName;
+  let resolvedCityId = requestedCityId;
+
+  const areaLookup = (await db.prepare(
+    `SELECT a.id, a.name, a.city_id, c.is_enabled, c.is_active FROM areas a JOIN cities c ON c.id = a.city_id WHERE a.id = ? OR LOWER(a.name) = LOWER(?) LIMIT 1`
+  ).bind(requestedAreaId, requestedAreaId).first()) as any;
+
+  if (areaLookup) {
+    resolvedAreaName = resolvedAreaName || areaLookup.name;
+    resolvedCityId = resolvedCityId || areaLookup.city_id;
+  } else {
+    const fallbackLookup = (await db.prepare(
+      `SELECT ca.id, ca.name, ca.city_id, c.is_enabled, c.is_active FROM city_areas ca JOIN cities c ON c.id = ca.city_id WHERE ca.id = ? OR LOWER(ca.name) = LOWER(?) LIMIT 1`
+    ).bind(requestedAreaId, requestedAreaId).first()) as any;
+    if (fallbackLookup) {
+      resolvedAreaName = resolvedAreaName || fallbackLookup.name;
+      resolvedCityId = resolvedCityId || fallbackLookup.city_id;
+    }
+  }
+
+  if (!resolvedAreaName) {
+    resolvedAreaName = requestedAreaId;
+  }
+
+  const requestId = `areareq_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`;
+
+  await db.prepare(
+    `INSERT INTO area_change_requests (
+      id, user_handle, current_city_id, current_area_id, current_area_name,
+      requested_city_id, requested_area_id, requested_area_name, reason, status
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`
+  ).bind(
+    requestId,
+    handle,
+    currentProfile?.home_city_id || 'GJ-VAD',
+    currentProfile?.home_area_id || '',
+    currentProfile?.home_area_name || 'Vadodara',
+    resolvedCityId,
+    requestedAreaId,
+    resolvedAreaName,
+    reason
+  ).run();
+
+  return c.json({
+    success: true,
+    message: 'Area change request submitted successfully. It will be reviewed by an admin shortly.',
+    request: {
+      id: requestId,
+      user_handle: handle,
+      current_city_id: currentProfile?.home_city_id || 'GJ-VAD',
+      current_area_id: currentProfile?.home_area_id || '',
+      current_area_name: currentProfile?.home_area_name || 'Vadodara',
+      requested_city_id: resolvedCityId,
+      requested_area_id: requestedAreaId,
+      requested_area_name: resolvedAreaName,
+      reason,
+      status: 'pending',
+      created_at: new Date().toISOString(),
+    },
+  });
+});
+
+profileApp.post('/area-change-request/cancel', authMiddleware, async (c) => {
+  const user = c.get('user');
+  const handle = (user?.userHandle || '').replace(/^@+/, '').trim().toLowerCase();
+  const body = await c.req.json().catch(() => ({}));
+  const db = getDatabase(c);
+  const requestId = (body.requestId || body.request_id || '').trim();
+
+  if (requestId) {
+    await db.prepare(
+      `UPDATE area_change_requests SET status = 'cancelled' WHERE id = ? AND (LOWER(user_handle) = LOWER(?) OR LOWER(user_handle) = LOWER(?)) AND status = 'pending'`
+    ).bind(requestId, handle, `@${handle}`).run();
+  } else {
+    await db.prepare(
+      `UPDATE area_change_requests SET status = 'cancelled' WHERE (LOWER(user_handle) = LOWER(?) OR LOWER(user_handle) = LOWER(?)) AND status = 'pending'`
+    ).bind(handle, `@${handle}`).run();
+  }
+
+  return c.json({ success: true, message: 'Area change request cancelled.' });
+});
+
 profileApp.get('/:handle', async (c) => {
   const raw = c.req.param('handle');
   const cleanHandle = raw.replace(/^@+/, '').trim();

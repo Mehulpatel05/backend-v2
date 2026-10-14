@@ -796,4 +796,157 @@ adminApp.get('/cities/:id/areas', async (c) => {
   }
 });
 
+adminApp.get('/area-change-requests', async (c) => {
+  const db = getDatabase(c);
+  const status = (c.req.query('status') || 'pending').trim().toLowerCase();
+
+  try {
+    let query = `
+      SELECT 
+        r.*,
+        COALESCE(p.display_name, r.user_handle) as display_name,
+        COALESCE(p.avatar_r2_path, '') as avatar_r2_path,
+        COALESCE(u.phone, '') as phone
+      FROM area_change_requests r
+      LEFT JOIN profiles p ON (LOWER(p.handle) = LOWER(r.user_handle) OR LOWER(p.handle) = LOWER(REPLACE(r.user_handle, '@', '')))
+      LEFT JOIN users u ON (LOWER(u.handle) = LOWER(r.user_handle) OR LOWER(u.handle) = LOWER(REPLACE(r.user_handle, '@', '')))
+    `;
+    const params: any[] = [];
+    if (status !== 'all') {
+      query += ` WHERE r.status = ? `;
+      params.push(status);
+    }
+    query += ` ORDER BY r.created_at DESC LIMIT 150`;
+
+    const { results } = await db.prepare(query).bind(...params).all();
+
+    const pendingCountRow = (await db.prepare(
+      "SELECT COUNT(*) as cnt FROM area_change_requests WHERE status = 'pending'"
+    ).first()) as any;
+
+    return c.json({
+      success: true,
+      pendingCount: pendingCountRow?.cnt ? Number(pendingCountRow.cnt) : 0,
+      requests: results || [],
+    });
+  } catch (e: any) {
+    return c.json({ success: false, error: e.message }, 500);
+  }
+});
+
+adminApp.post('/area-change-requests/:id/approve', async (c) => {
+  const id = c.req.param('id');
+  const body = await c.req.json().catch(() => ({}));
+  const adminNotes = (body.adminNotes || body.admin_notes || '').trim();
+  const db = getDatabase(c);
+
+  try {
+    const req = (await db.prepare('SELECT * FROM area_change_requests WHERE id = ?').bind(id).first()) as any;
+    if (!req) {
+      return c.json({ success: false, error: 'Request not found' }, 404);
+    }
+    if (req.status !== 'pending') {
+      return c.json({ success: false, error: `Request already marked as ${req.status}` }, 400);
+    }
+
+    const adminUsername = 'admin_vadodara';
+
+    await db.prepare(
+      `UPDATE area_change_requests 
+       SET status = 'approved', reviewed_at = CURRENT_TIMESTAMP, reviewed_by = ?, admin_notes = ?
+       WHERE id = ?`
+    ).bind(adminUsername, adminNotes, id).run();
+
+    await db.batch([
+      db.prepare(
+        `UPDATE users 
+         SET area_id = ?, city_id = ?, area_confirmed = 1, area_updated_at = CURRENT_TIMESTAMP 
+         WHERE LOWER(handle) = LOWER(?) OR LOWER(handle) = LOWER(?)`
+      ).bind(req.requested_area_id, req.requested_city_id, req.user_handle, `@${req.user_handle}`),
+      db.prepare(
+        `UPDATE profiles 
+         SET home_area_id = ?, home_area_name = ?, home_city_id = ?, area_confirmed = 1, area_updated_at = CURRENT_TIMESTAMP 
+         WHERE LOWER(handle) = LOWER(?) OR LOWER(handle) = LOWER(?)`
+      ).bind(req.requested_area_id, req.requested_area_name, req.requested_city_id, req.user_handle, `@${req.user_handle}`),
+    ]);
+
+    const notifId = `notif_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`;
+    const payload = JSON.stringify({
+      area_id: req.requested_area_id,
+      area_name: req.requested_area_name,
+      city_id: req.requested_city_id,
+    });
+
+    try {
+      await db.prepare(
+        `INSERT INTO notifications (id, target_handle, sender_handle, title, body, type, payload_json, is_read, created_at)
+         VALUES (?, ?, 'nearhood_team', 'Area Change Approved! 🎉', ?, 'area_change_approved', ?, 0, CURRENT_TIMESTAMP)`
+      ).bind(
+        notifId,
+        req.user_handle,
+        `Your home area has been updated to ${req.requested_area_name}. Welcome to your new neighborhood!`,
+        payload
+      ).run();
+    } catch (_) {}
+
+    return c.json({
+      success: true,
+      message: `Area change request for @${req.user_handle} approved. Area updated to ${req.requested_area_name}.`,
+    });
+  } catch (e: any) {
+    return c.json({ success: false, error: e.message }, 500);
+  }
+});
+
+adminApp.post('/area-change-requests/:id/reject', async (c) => {
+  const id = c.req.param('id');
+  const body = await c.req.json().catch(() => ({}));
+  const reason = (body.reason || body.adminNotes || body.admin_notes || 'Request does not meet community criteria').trim();
+  const db = getDatabase(c);
+
+  try {
+    const req = (await db.prepare('SELECT * FROM area_change_requests WHERE id = ?').bind(id).first()) as any;
+    if (!req) {
+      return c.json({ success: false, error: 'Request not found' }, 404);
+    }
+    if (req.status !== 'pending') {
+      return c.json({ success: false, error: `Request already marked as ${req.status}` }, 400);
+    }
+
+    const adminUsername = 'admin_vadodara';
+
+    await db.prepare(
+      `UPDATE area_change_requests 
+       SET status = 'rejected', reviewed_at = CURRENT_TIMESTAMP, reviewed_by = ?, admin_notes = ?
+       WHERE id = ?`
+    ).bind(adminUsername, reason, id).run();
+
+    const notifId = `notif_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`;
+    const payload = JSON.stringify({
+      area_id: req.requested_area_id,
+      area_name: req.requested_area_name,
+      reason,
+    });
+
+    try {
+      await db.prepare(
+        `INSERT INTO notifications (id, target_handle, sender_handle, title, body, type, payload_json, is_read, created_at)
+         VALUES (?, ?, 'nearhood_team', 'Area Change Request Update', ?, 'area_change_rejected', ?, 0, CURRENT_TIMESTAMP)`
+      ).bind(
+        notifId,
+        req.user_handle,
+        `Your request to move to ${req.requested_area_name} could not be approved: ${reason}`,
+        payload
+      ).run();
+    } catch (_) {}
+
+    return c.json({
+      success: true,
+      message: `Area change request for @${req.user_handle} rejected.`,
+    });
+  } catch (e: any) {
+    return c.json({ success: false, error: e.message }, 500);
+  }
+});
+
 export { adminApp };

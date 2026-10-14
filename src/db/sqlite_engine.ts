@@ -563,6 +563,26 @@ CREATE TABLE IF NOT EXISTS waitlist (
 
 CREATE INDEX IF NOT EXISTS idx_waitlist_city ON waitlist(city_text, status);
 CREATE INDEX IF NOT EXISTS idx_waitlist_device ON waitlist(contact_or_device_id);
+
+CREATE TABLE IF NOT EXISTS area_change_requests (
+    id TEXT PRIMARY KEY,
+    user_handle TEXT NOT NULL,
+    current_city_id TEXT NOT NULL,
+    current_area_id TEXT NOT NULL,
+    current_area_name TEXT NOT NULL,
+    requested_city_id TEXT NOT NULL,
+    requested_area_id TEXT NOT NULL,
+    requested_area_name TEXT NOT NULL,
+    reason TEXT DEFAULT '',
+    status TEXT DEFAULT 'pending',
+    admin_notes TEXT DEFAULT '',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    reviewed_at TIMESTAMP NULL,
+    reviewed_by TEXT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_area_requests_user ON area_change_requests(user_handle, status);
+CREATE INDEX IF NOT EXISTS idx_area_requests_status ON area_change_requests(status, created_at DESC);
 `;
 
 let schemaInitPromise: Promise<void> | null = null;
@@ -678,6 +698,28 @@ export async function ensureSqliteSchema(): Promise<void> {
         'ALTER TABLE users ADD COLUMN area_id TEXT DEFAULT ""',
         'ALTER TABLE users ADD COLUMN city_id TEXT DEFAULT ""',
         'ALTER TABLE users ADD COLUMN address_note TEXT DEFAULT ""',
+        'ALTER TABLE users ADD COLUMN area_confirmed INTEGER DEFAULT 1',
+        'ALTER TABLE profiles ADD COLUMN area_confirmed INTEGER DEFAULT 1',
+        'ALTER TABLE profiles ADD COLUMN area_updated_at TIMESTAMP NULL',
+        'ALTER TABLE users ADD COLUMN area_updated_at TIMESTAMP NULL',
+        `CREATE TABLE IF NOT EXISTS area_change_requests (
+            id TEXT PRIMARY KEY,
+            user_handle TEXT NOT NULL,
+            current_city_id TEXT NOT NULL,
+            current_area_id TEXT NOT NULL,
+            current_area_name TEXT NOT NULL,
+            requested_city_id TEXT NOT NULL,
+            requested_area_id TEXT NOT NULL,
+            requested_area_name TEXT NOT NULL,
+            reason TEXT DEFAULT '',
+            status TEXT DEFAULT 'pending',
+            admin_notes TEXT DEFAULT '',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            reviewed_at TIMESTAMP NULL,
+            reviewed_by TEXT NULL
+        )`,
+        'CREATE INDEX IF NOT EXISTS idx_area_requests_user ON area_change_requests(user_handle, status)',
+        'CREATE INDEX IF NOT EXISTS idx_area_requests_status ON area_change_requests(status, created_at DESC)',
       ];
 
       for (const m of migrations) {
