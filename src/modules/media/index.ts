@@ -43,7 +43,26 @@ const ALLOWED_MIME_TYPES = [
   'image/jpeg', 'image/png', 'image/webp', 'image/gif',
   'audio/mpeg', 'audio/mp4', 'audio/aac', 'audio/wav', 'audio/ogg', 'audio/m4a'
 ];
-const MAX_UPLOAD_SIZE = 15 * 1024 * 1024; // 15 MB
+const MAX_UPLOAD_SIZE = 15 * 1024 * 1024;
+
+function getContentTypeFromPath(filePath: string, fallback?: string): string {
+  const ext = filePath.split('.').pop()?.toLowerCase() || '';
+  switch (ext) {
+    case 'm4a': return 'audio/mp4';
+    case 'aac': return 'audio/aac';
+    case 'mp3': return 'audio/mpeg';
+    case 'wav': return 'audio/wav';
+    case 'ogg': return 'audio/ogg';
+    case 'webm': return 'audio/webm';
+    case 'jpg':
+    case 'jpeg': return 'image/jpeg';
+    case 'png': return 'image/png';
+    case 'webp': return 'image/webp';
+    case 'gif': return 'image/gif';
+    case 'mp4': return 'video/mp4';
+    default: return fallback || 'application/octet-stream';
+  }
+}
 
 // 1. Direct Multipart/Binary Media Upload into User-Dedicated R2 Folder
 // Uses authMiddleware so we always get the real user handle from D1
@@ -100,7 +119,7 @@ mediaApp.post('/upload', authMiddleware, async (c) => {
 
   const arrayBuffer = await file.arrayBuffer();
   const buffer = Buffer.from(arrayBuffer);
-  const contentType = file.type || 'image/jpeg';
+  const contentType = getContentTypeFromPath(filename, file.type);
 
   if (c.env && c.env.MEDIA_BUCKET) {
     await c.env.MEDIA_BUCKET.put(r2Path, arrayBuffer, {
@@ -218,8 +237,10 @@ mediaApp.get('/file/*', async (c) => {
     }
     const headers = new Headers();
     object.writeHttpMetadata(headers);
+    headers.set('Content-Type', getContentTypeFromPath(path, headers.get('Content-Type') || undefined));
     headers.set('etag', object.httpEtag);
     headers.set('Cache-Control', 'public, max-age=31536000, immutable');
+    headers.set('Accept-Ranges', 'bytes');
     headers.set('X-Content-Type-Options', 'nosniff');
     return new Response(object.body, { headers });
   } else {
@@ -230,14 +251,15 @@ mediaApp.get('/file/*', async (c) => {
       const response = await client.send(command);
 
       const headers = new Headers();
-      if (response.ContentType) headers.set('Content-Type', response.ContentType);
+      headers.set('Content-Type', getContentTypeFromPath(path, response.ContentType));
       if (response.ContentLength !== undefined && response.ContentLength !== null) {
         headers.set('Content-Length', response.ContentLength.toString());
       }
       if (response.ETag) headers.set('ETag', response.ETag);
       headers.set('Cache-Control', 'public, max-age=31536000, immutable');
+      headers.set('Accept-Ranges', 'bytes');
       headers.set('Access-Control-Allow-Origin', '*');
-      headers.set('Access-Control-Expose-Headers', 'Content-Length, ETag');
+      headers.set('Access-Control-Expose-Headers', 'Content-Length, ETag, Accept-Ranges');
       headers.set('X-Content-Type-Options', 'nosniff');
 
       const bytes = typeof (response.Body as any)?.transformToByteArray === 'function'

@@ -27,8 +27,8 @@ chatApp.get('/', authMiddleware, async (c) => {
        pr.is_verified,
        pr.bio,
        af.seq AS founder_seq,
-       (SELECT cm.message_type FROM chat_messages cm WHERE LOWER(cm.chat_id) = LOWER(c.canonical_id) ORDER BY cm.created_at DESC LIMIT 1) AS latest_msg_type,
-       (SELECT cm.media_r2_path FROM chat_messages cm WHERE LOWER(cm.chat_id) = LOWER(c.canonical_id) ORDER BY cm.created_at DESC LIMIT 1) AS latest_media_path
+       (SELECT cm.message_type FROM chat_messages cm WHERE (LOWER(cm.chat_id) = LOWER(c.canonical_id) OR LOWER(cm.chat_id) = LOWER(c.id)) ORDER BY cm.created_at DESC, cm.id DESC LIMIT 1) AS latest_msg_type,
+       (SELECT cm.media_r2_path FROM chat_messages cm WHERE (LOWER(cm.chat_id) = LOWER(c.canonical_id) OR LOWER(cm.chat_id) = LOWER(c.id)) ORDER BY cm.created_at DESC, cm.id DESC LIMIT 1) AS latest_media_path
      FROM chats c
      LEFT JOIN profiles pr ON LOWER(REPLACE(
        CASE 
@@ -240,7 +240,7 @@ async function handleSendMessage(c: any) {
   const rawMediaUrls: string[] = Array.isArray(body.mediaUrls)
     ? body.mediaUrls.filter((u: any) => typeof u === 'string' && u.trim().length > 0)
     : [];
-  let mediaR2Path = body.mediaR2Path || body.imageUrl || (rawMediaUrls.length > 0 ? rawMediaUrls[0] : '');
+  let mediaR2Path = body.mediaR2Path || body.audioUrl || body.imageUrl || (rawMediaUrls.length > 0 ? rawMediaUrls[0] : '');
   if (mediaR2Path && !rawMediaUrls.includes(mediaR2Path)) {
     rawMediaUrls.unshift(mediaR2Path);
   }
@@ -250,6 +250,8 @@ async function handleSendMessage(c: any) {
   const mediaUrlsJson = JSON.stringify(rawMediaUrls);
   const isAudio = body.messageType === 'voice_note' ||
     body.messageType === 'audio' ||
+    body.type === 'voice_note' ||
+    body.type === 'audio' ||
     (typeof mediaR2Path === 'string' && (mediaR2Path.endsWith('.m4a') || mediaR2Path.endsWith('.aac') || mediaR2Path.endsWith('.mp3') || mediaR2Path.includes('/voice_') || mediaR2Path.includes('voice_')));
   const messageType = isAudio ? 'voice_note' : (body.messageType || body.type || (rawMediaUrls.length > 1 ? 'image_group' : (mediaR2Path ? 'image' : 'text')));
 
@@ -289,13 +291,13 @@ async function handleSendMessage(c: any) {
 
   let previewText = (content || '').trim();
   if (!previewText) {
-    if (messageType === 'voice_note' || messageType === 'audio') {
+    if (messageType === 'voice_note' || messageType === 'audio' || isAudio) {
       previewText = '🎤 Voice note';
     } else if (messageType === 'video') {
       previewText = '🎥 Video';
-    } else if (messageType === 'image_group' || (rawMediaUrls.length > 1 && messageType !== 'voice_note')) {
+    } else if (messageType === 'image_group' || (rawMediaUrls.length > 1 && messageType !== 'voice_note' && !isAudio)) {
       previewText = `📷 ${rawMediaUrls.length} photos`;
-    } else if (messageType === 'image' || mediaR2Path) {
+    } else if (messageType === 'image' || (mediaR2Path && !isAudio)) {
       previewText = '📷 Photo';
     } else {
       previewText = 'Sent you a message';
