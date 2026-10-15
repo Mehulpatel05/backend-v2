@@ -71,6 +71,7 @@ export interface PushNotificationPayload {
   targetHandle: string;
   title: string;
   body: string;
+  imageUrl?: string;
   data?: Record<string, string>;
   channelId?: string;
   db: any;
@@ -80,6 +81,7 @@ export async function sendPushNotification({
   targetHandle,
   title,
   body,
+  imageUrl,
   data = {},
   channelId = 'nearhood_channel',
   db,
@@ -134,18 +136,26 @@ export async function sendPushNotification({
       }
     }
 
+    const effectiveImageUrl = (imageUrl || data?.imageUrl || data?.avatarUrl || data?.senderAvatarUrl || '').trim();
+
     const stringData: Record<string, string> = {};
     for (const [key, value] of Object.entries(data)) {
       stringData[key] = typeof value === 'string' ? value : JSON.stringify(value);
     }
     stringData['title'] = effectiveTitle;
     stringData['body'] = effectiveBody;
+    if (effectiveImageUrl) {
+      stringData['imageUrl'] = effectiveImageUrl;
+      stringData['avatarUrl'] = effectiveImageUrl;
+      stringData['senderAvatarUrl'] = effectiveImageUrl;
+    }
 
     const message: Message = {
       token: fcmToken,
       notification: {
         title: effectiveTitle,
         body: effectiveBody,
+        ...(effectiveImageUrl ? { imageUrl: effectiveImageUrl } : {}),
       },
       data: stringData,
       android: {
@@ -156,6 +166,7 @@ export async function sendPushNotification({
           priority: 'max',
           defaultSound: true,
           defaultVibrateTimings: true,
+          ...(effectiveImageUrl ? { imageUrl: effectiveImageUrl } : {}),
         },
       },
       apns: {
@@ -169,6 +180,7 @@ export async function sendPushNotification({
             badge: 1,
           },
         },
+        ...(effectiveImageUrl ? { fcmOptions: { imageUrl: effectiveImageUrl } } : {}),
       },
     };
 

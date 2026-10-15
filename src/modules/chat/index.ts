@@ -26,7 +26,9 @@ chatApp.get('/', authMiddleware, async (c) => {
        COALESCE(pr.avatar_r2_path, '') AS other_avatar_r2_path,
        pr.is_verified,
        pr.bio,
-       af.seq AS founder_seq
+       af.seq AS founder_seq,
+       (SELECT cm.message_type FROM chat_messages cm WHERE LOWER(cm.chat_id) = LOWER(c.canonical_id) ORDER BY cm.created_at DESC LIMIT 1) AS latest_msg_type,
+       (SELECT cm.media_r2_path FROM chat_messages cm WHERE LOWER(cm.chat_id) = LOWER(c.canonical_id) ORDER BY cm.created_at DESC LIMIT 1) AS latest_media_path
      FROM chats c
      LEFT JOIN profiles pr ON LOWER(REPLACE(
        CASE 
@@ -70,6 +72,23 @@ chatApp.get('/', authMiddleware, async (c) => {
     const isVerified = isFounder || isVerifiedCitizen;
     const authorBadge = isFounder ? `FOUNDING #${row.founder_seq}` : (isVerifiedCitizen ? 'VERIFIED' : null);
 
+    const rawType = (row.latest_msg_type || row.last_message_type || '').toLowerCase();
+    const rawMedia = (row.latest_media_path || '').toLowerCase();
+    const rawMsg = (row.last_message || '');
+    const isVoice = rawType === 'voice_note' ||
+      rawType === 'audio' ||
+      rawMedia.includes('voice_') ||
+      rawMedia.endsWith('.m4a') ||
+      rawMedia.endsWith('.aac') ||
+      rawMedia.endsWith('.mp3') ||
+      rawMsg.includes('voice_') ||
+      rawMsg.endsWith('.m4a') ||
+      rawMsg.endsWith('.aac') ||
+      rawMsg.endsWith('.mp3');
+
+    const finalLastMsg = isVoice ? '🎤 Voice note' : (row.last_message || '');
+    const finalLastType = isVoice ? 'voice_note' : (row.latest_msg_type || row.last_message_type || 'text');
+
     formatted.push({
       id: row.id,
       chatId: row.canonical_id || row.id,
@@ -88,8 +107,8 @@ chatApp.get('/', authMiddleware, async (c) => {
       author_badge: authorBadge,
       badge: authorBadge,
       founderSeq: row.founder_seq ?? null,
-      lastMessage: row.last_message || '',
-      lastMessageType: row.last_message_type || 'text',
+      lastMessage: finalLastMsg,
+      lastMessageType: finalLastType,
       lastTimestamp: row.last_timestamp || Date.now(),
       unreadCount: unreadCount || 0,
       updatedAt: row.updated_at,
@@ -333,23 +352,29 @@ async function handleSendMessage(c: any) {
     const notifId = `notif_${now}_${Math.floor(1000 + Math.random() * 9000)}`;
 
     let senderDisplayName = '';
+    let senderAvatarUrl = '';
     try {
-      const senderProfile = (await db.prepare('SELECT display_name FROM profiles WHERE handle = ? OR handle = ? LIMIT 1')
+      const senderProfile = (await db.prepare('SELECT display_name, avatar_r2_path FROM profiles WHERE handle = ? OR handle = ? LIMIT 1')
         .bind(myHandle, `@${myHandle}`)
         .first()) as any;
       senderDisplayName = (senderProfile?.display_name || '').trim();
+      senderAvatarUrl = (senderProfile?.avatar_r2_path || '').trim();
     } catch (_) {}
 
     const cleanMyHandle = myHandle.replace(/^@+/, '').trim();
-    const notifTitle = (senderDisplayName && senderDisplayName.toLowerCase() !== cleanMyHandle.toLowerCase())
-      ? `${senderDisplayName} (@${cleanMyHandle})`
-      : `@${cleanMyHandle}`;
+    const notifTitle = senderDisplayName || `@${cleanMyHandle}`;
     const payload = {
       type: 'chat',
+      notifId: notifId,
+      id: notifId,
+      messageId: msgId,
       partnerHandle: myHandle,
       senderHandle: myHandle,
       senderName: senderDisplayName || myHandle,
       senderDisplayName: senderDisplayName || myHandle,
+      senderAvatarUrl: senderAvatarUrl,
+      avatarUrl: senderAvatarUrl,
+      imageUrl: senderAvatarUrl,
       chatId: canonicalId,
     };
 
@@ -365,11 +390,11 @@ async function handleSendMessage(c: any) {
       JSON.stringify(payload)
     ).run();
 
-    // Send FCM Push Notification for background/killed state
     sendPushNotification({
       targetHandle: receiver,
       title: notifTitle,
       body: previewText,
+      imageUrl: senderAvatarUrl || undefined,
       data: payload,
       channelId: 'nearhood_channel',
       db,

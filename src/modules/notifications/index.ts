@@ -107,6 +107,23 @@ notificationsApp.post('/', async (c) => {
   }
 
   const notifId = `notif_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`;
+  payloadData.id = notifId;
+  payloadData.notifId = notifId;
+
+  let senderAvatarUrl = (payloadData.senderAvatarUrl || payloadData.avatarUrl || '').trim();
+  if (!senderAvatarUrl && senderHandle) {
+    try {
+      const sp = (await db.prepare('SELECT avatar_r2_path FROM profiles WHERE handle = ? OR handle = ? LIMIT 1')
+        .bind(senderHandle, `@${senderHandle}`)
+        .first()) as any;
+      if (sp?.avatar_r2_path) {
+        senderAvatarUrl = sp.avatar_r2_path.trim();
+        payloadData.senderAvatarUrl = senderAvatarUrl;
+        payloadData.avatarUrl = senderAvatarUrl;
+        payloadData.imageUrl = senderAvatarUrl;
+      }
+    } catch (_) {}
+  }
 
   await db.prepare(
     `INSERT INTO notifications (id, target_handle, sender_handle, type, title, body, payload_json, is_read, created_at)
@@ -127,6 +144,7 @@ notificationsApp.post('/', async (c) => {
     targetHandle,
     title,
     body: notifBody,
+    imageUrl: senderAvatarUrl || undefined,
     data: payloadData,
     channelId: 'nearhood_channel',
     db,
