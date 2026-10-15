@@ -121,7 +121,7 @@ async function handleGetPosts(c: any) {
     WHERE (p.status = 'active' OR p.status IS NULL OR p.status = '')
   `;
   if (!includeTest) {
-    query += " AND LOWER(p.content) NOT IN ('test', 'testing', 'asdf', 'test post') AND LOWER(p.content) NOT LIKE '[test]%'";
+    query += " AND LOWER(p.content) NOT IN ('test', 'testing', 'asdf', 'test post', 'kya') AND LOWER(p.content) NOT LIKE '[test]%' AND LOWER(p.content) NOT LIKE '%game screenshot%'";
   }
   const params: any[] = [];
 
@@ -199,6 +199,10 @@ async function handleCreatePost(c: any) {
 
   if (!content && mediaUrls.length === 0 && !imageUrl) {
     return c.json({ success: false, error: 'Post must contain text or media' }, 400);
+  }
+
+  if (content && content.length < 15 && mediaUrls.length === 0 && !imageUrl) {
+    return c.json({ success: false, error: 'Post content is too short. Please write at least 15 characters.' }, 400);
   }
 
   if (content.length > 5000) {

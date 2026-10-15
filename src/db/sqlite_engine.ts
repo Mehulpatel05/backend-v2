@@ -150,6 +150,14 @@ CREATE TABLE IF NOT EXISTS user_preferences (
     call_privacy TEXT DEFAULT 'everyone',
     pinned_chats_json TEXT DEFAULT '[]',
     muted_chats_json TEXT DEFAULT '[]',
+    favourite_chats_json TEXT DEFAULT '[]',
+    archived_chats_json TEXT DEFAULT '[]',
+    locked_chats_json TEXT DEFAULT '[]',
+    deleted_chats_json TEXT DEFAULT '[]',
+    pinned_timestamps_json TEXT DEFAULT '{}',
+    archived_timestamps_json TEXT DEFAULT '{}',
+    chat_preferences_json TEXT DEFAULT '{}',
+    keep_chats_archived INTEGER DEFAULT 0,
     theme TEXT DEFAULT 'dark',
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(user_handle) REFERENCES users(handle) ON DELETE CASCADE
@@ -720,6 +728,14 @@ export async function ensureSqliteSchema(): Promise<void> {
         )`,
         'CREATE INDEX IF NOT EXISTS idx_area_requests_user ON area_change_requests(user_handle, status)',
         'CREATE INDEX IF NOT EXISTS idx_area_requests_status ON area_change_requests(status, created_at DESC)',
+        'ALTER TABLE user_preferences ADD COLUMN favourite_chats_json TEXT DEFAULT "[]"',
+        'ALTER TABLE user_preferences ADD COLUMN archived_chats_json TEXT DEFAULT "[]"',
+        'ALTER TABLE user_preferences ADD COLUMN locked_chats_json TEXT DEFAULT "[]"',
+        'ALTER TABLE user_preferences ADD COLUMN deleted_chats_json TEXT DEFAULT "[]"',
+        'ALTER TABLE user_preferences ADD COLUMN pinned_timestamps_json TEXT DEFAULT "{}"',
+        'ALTER TABLE user_preferences ADD COLUMN archived_timestamps_json TEXT DEFAULT "{}"',
+        'ALTER TABLE user_preferences ADD COLUMN chat_preferences_json TEXT DEFAULT "{}"',
+        'ALTER TABLE user_preferences ADD COLUMN keep_chats_archived INTEGER DEFAULT 0',
       ];
 
       for (const m of migrations) {

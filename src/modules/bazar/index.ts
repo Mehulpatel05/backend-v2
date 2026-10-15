@@ -34,6 +34,9 @@ bazarApp.get('/listings', async (c) => {
       GROUP BY listing_id
     ) lb ON b.id = lb.listing_id
     WHERE b.is_active = 1
+      AND LOWER(b.title) NOT IN ('test', 'testing')
+      AND LOWER(b.title) NOT LIKE '%bus for sale%'
+      AND LOWER(b.title) NOT LIKE '[test]%'
   `;
   const params: any[] = [];
 

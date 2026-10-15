@@ -44,10 +44,17 @@ profileApp.get('/area-change-request/status', authMiddleware, async (c) => {
      ORDER BY created_at DESC LIMIT 1`
   ).bind(handle, `@${handle}`).first()) as any;
 
+  const latestRequest = (await db.prepare(
+    `SELECT * FROM area_change_requests 
+     WHERE (LOWER(user_handle) = LOWER(?) OR LOWER(user_handle) = LOWER(?)) 
+     ORDER BY created_at DESC LIMIT 1`
+  ).bind(handle, `@${handle}`).first()) as any;
+
   return c.json({
     success: true,
     hasPending: !!pendingRequest,
-    request: pendingRequest || null,
+    request: pendingRequest || latestRequest || null,
+    latestRequest: latestRequest || null,
     currentArea: {
       cityId: profile?.home_city_id || 'GJ-VAD',
       areaId: profile?.home_area_id || '',
