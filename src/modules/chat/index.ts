@@ -177,7 +177,10 @@ chatApp.get('/:chatId/messages', authMiddleware, async (c) => {
       mediaUrls = [row.media_r2_path];
     }
     const mediaR2Path = row.media_r2_path || (mediaUrls.length > 0 ? mediaUrls[0] : '');
-    const resolvedType = row.message_type || (mediaUrls.length > 1 ? 'image_group' : (mediaR2Path ? 'image' : 'text'));
+    const isAudio = row.message_type === 'voice_note' ||
+      row.message_type === 'audio' ||
+      (typeof mediaR2Path === 'string' && (mediaR2Path.endsWith('.m4a') || mediaR2Path.endsWith('.aac') || mediaR2Path.endsWith('.mp3') || mediaR2Path.includes('/voice_') || mediaR2Path.includes('voice_')));
+    const resolvedType = isAudio ? 'voice_note' : (row.message_type || (mediaUrls.length > 1 ? 'image_group' : (mediaR2Path ? 'image' : 'text')));
 
     return {
       id: row.id,
@@ -187,14 +190,15 @@ chatApp.get('/:chatId/messages', authMiddleware, async (c) => {
       receiverHandle: (row.receiver_handle || '').replace(/^@+/, '').trim(),
       content: row.content || '',
       mediaR2Path: mediaR2Path,
-      imageUrl: mediaR2Path,
-      mediaUrls: mediaUrls,
+      imageUrl: isAudio ? '' : mediaR2Path,
+      mediaUrls: isAudio ? [] : mediaUrls,
       media_urls_json: row.media_urls_json || JSON.stringify(mediaUrls),
       type: resolvedType,
       messageType: resolvedType,
       isRead: row.is_read === 1,
       createdAt: row.created_at,
       timestamp: row.created_at,
+      audioUrl: isAudio ? mediaR2Path : undefined,
     };
   });
 
@@ -225,7 +229,10 @@ async function handleSendMessage(c: any) {
     mediaR2Path = rawMediaUrls[0];
   }
   const mediaUrlsJson = JSON.stringify(rawMediaUrls);
-  const messageType = body.messageType || body.type || (rawMediaUrls.length > 1 ? 'image_group' : (mediaR2Path ? 'image' : 'text'));
+  const isAudio = body.messageType === 'voice_note' ||
+    body.messageType === 'audio' ||
+    (typeof mediaR2Path === 'string' && (mediaR2Path.endsWith('.m4a') || mediaR2Path.endsWith('.aac') || mediaR2Path.endsWith('.mp3') || mediaR2Path.includes('/voice_') || mediaR2Path.includes('voice_')));
+  const messageType = isAudio ? 'voice_note' : (body.messageType || body.type || (rawMediaUrls.length > 1 ? 'image_group' : (mediaR2Path ? 'image' : 'text')));
 
   if (!receiver) {
     return c.json({ success: false, error: 'Receiver handle is required' }, 400);
@@ -241,12 +248,10 @@ async function handleSendMessage(c: any) {
 
   const db = getDatabase(c);
 
-  // Check if users are blocked
   if (await isBlockedBetween(db, myHandle, receiver)) {
     return c.json({ success: false, error: 'Cannot send message: user is blocked' }, 403);
   }
 
-  // Ensure receiver exists
   const receiverUser = await db.prepare(
     'SELECT handle FROM users WHERE LOWER(handle) = ? OR LOWER(handle) = ? LIMIT 1'
   ).bind(receiver, `@${receiver}`).first();
@@ -265,16 +270,14 @@ async function handleSendMessage(c: any) {
 
   let previewText = (content || '').trim();
   if (!previewText) {
-    if (messageType === 'image_group' || rawMediaUrls.length > 1) {
-      previewText = `📷 ${rawMediaUrls.length} photos`;
-    } else if (messageType === 'image' || mediaR2Path) {
-      previewText = '📷 Photo';
-    } else if (messageType === 'voice_note') {
+    if (messageType === 'voice_note' || messageType === 'audio') {
       previewText = '🎤 Voice note';
     } else if (messageType === 'video') {
       previewText = '🎥 Video';
-    } else if (messageType === 'audio') {
-      previewText = '🎵 Audio';
+    } else if (messageType === 'image_group' || (rawMediaUrls.length > 1 && messageType !== 'voice_note')) {
+      previewText = `📷 ${rawMediaUrls.length} photos`;
+    } else if (messageType === 'image' || mediaR2Path) {
+      previewText = '📷 Photo';
     } else {
       previewText = 'Sent you a message';
     }
