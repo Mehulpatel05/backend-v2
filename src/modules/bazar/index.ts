@@ -392,7 +392,7 @@ bazarApp.post('/shops', authMiddleware, async (c) => {
       homeDelivery: !!homeDelivery,
       sameWhatsapp: !!sameWhatsapp,
       isOpen: !!isOpen,
-      status: 'active',
+      status: 'pending',
       isVerified: false,
     },
     message: 'Shop registered successfully',
@@ -636,7 +636,7 @@ bazarApp.get('/my-shop', authMiddleware, async (c) => {
       imageUrl: shop.logo_r2_path || shop.banner_r2_path || '',
       bannerUrl: shop.banner_r2_path || '',
       description: shop.description || '',
-      status: shop.status || 'active',
+      status: shop.status || 'pending',
       isOpen: shop.status !== 'inactive',
       isVerified,
       is_verified: isVerified ? 1 : 0,
@@ -996,23 +996,22 @@ bazarApp.delete('/shops/:id', authMiddleware, async (c) => {
   const db = getDatabase(c);
 
   try {
+    const cleanUser = (user.userHandle || '').replace(/^@+/, '').trim().toLowerCase();
     const shop = await db.prepare(
-      'SELECT id FROM bazar_shops WHERE id = ? AND (owner_handle = ? OR owner_handle = ?) LIMIT 1'
-    ).bind(shopId, user.userHandle, `@${user.userHandle}`).first();
+      'SELECT id FROM bazar_shops WHERE id = ? AND (LOWER(REPLACE(owner_handle, "@", "")) = ? OR id = ? OR LOWER(owner_handle) = ?) LIMIT 1'
+    ).bind(shopId, cleanUser, `shop_${cleanUser}`, cleanUser).first();
 
     if (!shop) {
       return c.json({ success: false, error: 'Shop not found or unauthorized' }, 404);
     }
 
     await db.prepare(
-      `DELETE FROM bazar_listings 
-       WHERE shop_id = ? 
-         AND shop_id IN (SELECT id FROM bazar_shops WHERE id = ? AND (owner_handle = ? OR owner_handle = ?))`
-    ).bind(shopId, shopId, user.userHandle, `@${user.userHandle}`).run();
+      'DELETE FROM bazar_listings WHERE shop_id = ?'
+    ).bind(shopId).run();
 
     await db.prepare(
-      'DELETE FROM bazar_shops WHERE id = ? AND (owner_handle = ? OR owner_handle = ?)'
-    ).bind(shopId, user.userHandle, `@${user.userHandle}`).run();
+      'DELETE FROM bazar_shops WHERE id = ?'
+    ).bind(shopId).run();
 
     return c.json({ success: true, message: 'Shop and its listings deleted successfully' });
   } catch (e: any) {
