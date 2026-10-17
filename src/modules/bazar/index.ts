@@ -334,7 +334,6 @@ bazarApp.post('/shops', authMiddleware, async (c) => {
     homeDelivery = 1,
     sameWhatsapp = 1,
     isOpen = 1,
-    status = 'pending',
   } = body;
 
   if (!shopName || !address || !phone) {
@@ -344,13 +343,12 @@ bazarApp.post('/shops', authMiddleware, async (c) => {
   const cleanHandle = (user.userHandle || '').replace(/^@+/, '').trim();
   const shopId = `shop_${cleanHandle}`;
   const db = getDatabase(c);
-  const finalStatus = status || 'pending';
 
   await db.prepare(
     `INSERT INTO bazar_shops (
       id, owner_handle, shop_name, category, address, phone,
       banner_r2_path, logo_r2_path, description, status
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
     ON CONFLICT(id) DO UPDATE SET
       shop_name = excluded.shop_name,
       category = excluded.category,
@@ -358,8 +356,7 @@ bazarApp.post('/shops', authMiddleware, async (c) => {
       phone = excluded.phone,
       banner_r2_path = excluded.banner_r2_path,
       logo_r2_path = excluded.logo_r2_path,
-      description = excluded.description,
-      status = excluded.status`
+      description = excluded.description`
   )
     .bind(
       shopId,
@@ -370,8 +367,7 @@ bazarApp.post('/shops', authMiddleware, async (c) => {
       phone,
       bannerR2Path,
       logoR2Path,
-      description,
-      finalStatus
+      description
     )
     .run();
 
@@ -392,7 +388,7 @@ bazarApp.post('/shops', authMiddleware, async (c) => {
       homeDelivery: !!homeDelivery,
       sameWhatsapp: !!sameWhatsapp,
       isOpen: !!isOpen,
-      status: 'pending',
+      status: 'active',
       isVerified: false,
     },
     message: 'Shop registered successfully',
@@ -636,7 +632,7 @@ bazarApp.get('/my-shop', authMiddleware, async (c) => {
       imageUrl: shop.logo_r2_path || shop.banner_r2_path || '',
       bannerUrl: shop.banner_r2_path || '',
       description: shop.description || '',
-      status: shop.status || 'pending',
+      status: shop.status || 'active',
       isOpen: shop.status !== 'inactive',
       isVerified,
       is_verified: isVerified ? 1 : 0,
@@ -996,22 +992,23 @@ bazarApp.delete('/shops/:id', authMiddleware, async (c) => {
   const db = getDatabase(c);
 
   try {
-    const cleanUser = (user.userHandle || '').replace(/^@+/, '').trim().toLowerCase();
     const shop = await db.prepare(
-      'SELECT id FROM bazar_shops WHERE id = ? AND (LOWER(REPLACE(owner_handle, "@", "")) = ? OR id = ? OR LOWER(owner_handle) = ?) LIMIT 1'
-    ).bind(shopId, cleanUser, `shop_${cleanUser}`, cleanUser).first();
+      'SELECT id FROM bazar_shops WHERE id = ? AND (owner_handle = ? OR owner_handle = ?) LIMIT 1'
+    ).bind(shopId, user.userHandle, `@${user.userHandle}`).first();
 
     if (!shop) {
       return c.json({ success: false, error: 'Shop not found or unauthorized' }, 404);
     }
 
     await db.prepare(
-      'DELETE FROM bazar_listings WHERE shop_id = ?'
-    ).bind(shopId).run();
+      `DELETE FROM bazar_listings 
+       WHERE shop_id = ? 
+         AND shop_id IN (SELECT id FROM bazar_shops WHERE id = ? AND (owner_handle = ? OR owner_handle = ?))`
+    ).bind(shopId, shopId, user.userHandle, `@${user.userHandle}`).run();
 
     await db.prepare(
-      'DELETE FROM bazar_shops WHERE id = ?'
-    ).bind(shopId).run();
+      'DELETE FROM bazar_shops WHERE id = ? AND (owner_handle = ? OR owner_handle = ?)'
+    ).bind(shopId, user.userHandle, `@${user.userHandle}`).run();
 
     return c.json({ success: true, message: 'Shop and its listings deleted successfully' });
   } catch (e: any) {

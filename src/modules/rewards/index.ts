@@ -752,13 +752,9 @@ rewardsApp.post('/boost', authMiddleware, async (c) => {
 rewardsApp.get('/perks', authMiddleware, async (c) => {
   const db = getDatabase(c);
   const perks = (await db.prepare(`
-    SELECT sc.*,
-      COALESCE(bs.shop_name, 'Nearhood Bazaar') as shop_name,
-      COALESCE(sc.category, bs.category, 'General') as category,
-      COALESCE(bs.logo_r2_path, '') as logo_r2_path,
-      COALESCE(bs.address, '') as address
+    SELECT sc.*, bs.shop_name, bs.category, bs.logo_r2_path, bs.address
     FROM shop_coupons sc
-    LEFT JOIN bazar_shops bs ON sc.shop_id = bs.id
+    JOIN bazar_shops bs ON sc.shop_id = bs.id
     WHERE sc.active = 1
     ORDER BY sc.created_at DESC
   `).all()) as any;
@@ -766,184 +762,6 @@ rewardsApp.get('/perks', authMiddleware, async (c) => {
   return c.json({
     success: true,
     perks: perks.results || [],
-  });
-});
-
-rewardsApp.get('/my-coupons', authMiddleware, async (c) => {
-  const user = c.get('user');
-  const clean = (user.userHandle || '').replace(/^@+/, '').trim();
-  const db = getDatabase(c);
-
-  const rows = (await db.prepare(`
-    SELECT uc.id, uc.code, uc.status, uc.expires_at, uc.created_at,
-      sc.id as coupon_id, sc.title, sc.description, sc.discount_type,
-      sc.discount_value, sc.min_order_value, sc.cost_points, sc.terms,
-      COALESCE(bs.shop_name, 'Nearhood Bazaar') as shop_name,
-      COALESCE(sc.category, bs.category, 'General') as category,
-      COALESCE(bs.logo_r2_path, '') as logo_r2_path,
-      COALESCE(bs.address, '') as address
-    FROM user_coupons uc
-    JOIN shop_coupons sc ON uc.coupon_id = sc.id
-    LEFT JOIN bazar_shops bs ON sc.shop_id = bs.id
-    WHERE uc.user_handle = ? OR uc.user_handle = ?
-    ORDER BY uc.created_at DESC
-  `).bind(clean, `@${clean}`).all()) as any;
-
-  return c.json({
-    success: true,
-    coupons: rows.results || [],
-  });
-});
-
-rewardsApp.get('/scratch-cards', authMiddleware, async (c) => {
-  const user = c.get('user');
-  const clean = (user.userHandle || '').replace(/^@+/, '').trim();
-  const db = getDatabase(c);
-
-  const rewards = await getOrCreateUserRewards(db, clean);
-  const today = getTodayString(rewards.timezone_offset || 5.5);
-
-  const rows = (await db.prepare(`
-    SELECT * FROM scratch_cards
-    WHERE user_handle = ? OR user_handle = ?
-    ORDER BY is_scratched ASC, created_at DESC
-  `).bind(clean, `@${clean}`).all()) as any;
-
-  const dailyClaimed = (await db.prepare(`
-    SELECT id FROM scratch_cards
-    WHERE (user_handle = ? OR user_handle = ?)
-      AND card_type = 'daily'
-      AND (date(created_at, '+5.5 hours') = ? OR date(created_at) = ?)
-    LIMIT 1
-  `).bind(clean, `@${clean}`, today, today).first()) as any;
-
-  return c.json({
-    success: true,
-    cards: rows.results || [],
-    dailyClaimedToday: !!dailyClaimed,
-  });
-});
-
-rewardsApp.post('/scratch-cards/claim-daily', authMiddleware, async (c) => {
-  const user = c.get('user');
-  const clean = (user.userHandle || '').replace(/^@+/, '').trim();
-  const db = getDatabase(c);
-
-  const rewards = await getOrCreateUserRewards(db, clean);
-  const today = getTodayString(rewards.timezone_offset || 5.5);
-
-  const existingToday = (await db.prepare(`
-    SELECT id FROM scratch_cards
-    WHERE (user_handle = ? OR user_handle = ?)
-      AND card_type = 'daily'
-      AND (date(created_at, '+5.5 hours') = ? OR date(created_at) = ?)
-    LIMIT 1
-  `).bind(clean, `@${clean}`, today, today).first()) as any;
-
-  if (existingToday) {
-    return c.json({
-      success: false,
-      error: 'Daily scratch card already claimed today. Come back tomorrow!',
-      cardId: existingToday.id,
-    }, 400);
-  }
-
-  const possiblePoints = [10, 15, 20, 25, 30, 35, 50];
-  const weights = [30, 25, 20, 12, 8, 4, 1];
-  let randomVal = Math.random() * 100;
-  let pointsAmount = 15;
-  for (let i = 0; i < weights.length; i++) {
-    if (randomVal < weights[i]) {
-      pointsAmount = possiblePoints[i];
-      break;
-    }
-    randomVal -= weights[i];
-  }
-
-  const cardId = `sc_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-  const title = 'Daily Mystery Reward';
-  const description = 'Scratch to reveal your surprise points!';
-
-  await db.prepare(`
-    INSERT INTO scratch_cards (
-      id, user_handle, title, description, points_amount, card_type, is_scratched,
-      expires_at, created_at
-    ) VALUES (?, ?, ?, ?, ?, 'daily', 0, datetime('now', '+7 days'), CURRENT_TIMESTAMP)
-  `).bind(cardId, clean, title, description, pointsAmount).run();
-
-  return c.json({
-    success: true,
-    card: {
-      id: cardId,
-      user_handle: clean,
-      title,
-      description,
-      points_amount: pointsAmount,
-      pointsAmount,
-      card_type: 'daily',
-      is_scratched: 0,
-      isScratched: false,
-      created_at: new Date().toISOString(),
-    },
-  });
-});
-
-rewardsApp.post('/scratch-cards/:id/scratch', authMiddleware, async (c) => {
-  const user = c.get('user');
-  const clean = (user.userHandle || '').replace(/^@+/, '').trim();
-  const cardId = c.req.param('id');
-  const db = getDatabase(c);
-
-  const card = (await db.prepare(`
-    SELECT * FROM scratch_cards
-    WHERE id = ? AND (user_handle = ? OR user_handle = ?)
-  `).bind(cardId, clean, `@${clean}`).first()) as any;
-
-  if (!card) {
-    return c.json({ success: false, error: 'Scratch card not found' }, 404);
-  }
-
-  if (card.is_scratched === 1) {
-    const userRewards = await getOrCreateUserRewards(db, clean);
-    return c.json({
-      success: true,
-      alreadyScratched: true,
-      pointsAwarded: card.points_amount,
-      newBalance: userRewards.balance,
-      message: 'Card was already scratched',
-    });
-  }
-
-  const updateRes = await db.prepare(`
-    UPDATE scratch_cards
-    SET is_scratched = 1, scratched_at = CURRENT_TIMESTAMP
-    WHERE id = ? AND is_scratched = 0
-  `).bind(cardId).run();
-
-  if (updateRes.meta?.changes === 0) {
-    const userRewards = await getOrCreateUserRewards(db, clean);
-    return c.json({
-      success: true,
-      alreadyScratched: true,
-      pointsAwarded: card.points_amount,
-      newBalance: userRewards.balance,
-    });
-  }
-
-  const awardRes = await awardPoints(db, {
-    userHandle: clean,
-    delta: card.points_amount,
-    reason: `Daily scratch card bonus (+${card.points_amount} pts)`,
-    action: 'scratch_card',
-    sourceId: cardId,
-    isAction: false,
-  });
-
-  return c.json({
-    success: true,
-    pointsAwarded: card.points_amount,
-    newBalance: awardRes.newBalance,
-    message: `Hooray! +${card.points_amount} points added to your balance.`,
   });
 });
 
@@ -990,9 +808,7 @@ rewardsApp.post('/coupons/unlock', authMiddleware, async (c) => {
   }
 
   const userCouponId = `uc_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
-  const code = (coupon.coupon_code && coupon.coupon_code.trim().length > 0)
-    ? coupon.coupon_code.trim()
-    : `NH-${Math.random().toString(36).substring(2, 7).toUpperCase()}`;
+  const code = `NH-${Math.random().toString(36).substring(2, 7).toUpperCase()}`;
   const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
 
   try {
