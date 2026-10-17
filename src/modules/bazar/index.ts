@@ -334,6 +334,7 @@ bazarApp.post('/shops', authMiddleware, async (c) => {
     homeDelivery = 1,
     sameWhatsapp = 1,
     isOpen = 1,
+    status = 'pending',
   } = body;
 
   if (!shopName || !address || !phone) {
@@ -343,12 +344,13 @@ bazarApp.post('/shops', authMiddleware, async (c) => {
   const cleanHandle = (user.userHandle || '').replace(/^@+/, '').trim();
   const shopId = `shop_${cleanHandle}`;
   const db = getDatabase(c);
+  const finalStatus = status || 'pending';
 
   await db.prepare(
     `INSERT INTO bazar_shops (
       id, owner_handle, shop_name, category, address, phone,
       banner_r2_path, logo_r2_path, description, status
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       shop_name = excluded.shop_name,
       category = excluded.category,
@@ -356,7 +358,8 @@ bazarApp.post('/shops', authMiddleware, async (c) => {
       phone = excluded.phone,
       banner_r2_path = excluded.banner_r2_path,
       logo_r2_path = excluded.logo_r2_path,
-      description = excluded.description`
+      description = excluded.description,
+      status = excluded.status`
   )
     .bind(
       shopId,
@@ -367,7 +370,8 @@ bazarApp.post('/shops', authMiddleware, async (c) => {
       phone,
       bannerR2Path,
       logoR2Path,
-      description
+      description,
+      finalStatus
     )
     .run();
 
