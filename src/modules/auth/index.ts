@@ -6,8 +6,15 @@ import { AppConfig } from '../../utils/config';
 import { WakitService } from '../../services/wakit_service';
 import { Fast2SmsService } from '../../services/fast2sms_service';
 import { orchestrateAccountDeletion } from '../account_deletion';
+import { findMasterCity } from '../../data/master_cities';
 
 const authApp = new Hono<{ Bindings: Env; Variables: Variables }>();
+
+function resolveCityName(cityId?: string | null): string {
+  if (!cityId) return '';
+  const master = findMasterCity(cityId);
+  return master ? master.name : cityId;
+}
 
 function generateSecureToken(): string {
   const buffer = new Uint8Array(32);
@@ -384,8 +391,9 @@ async function handleVerifyOtp(c: any) {
   let cityStatus = 'active';
   let cityMessage = '';
   const userCityId = userRow?.city_id || profileRow?.home_city_id;
+  let cityRow: any = null;
   if (userCityId) {
-    const cityRow = (await db.prepare('SELECT id, name, is_enabled, is_active FROM cities WHERE id = ?').bind(userCityId).first()) as any;
+    cityRow = (await db.prepare('SELECT id, name, is_enabled, is_active FROM cities WHERE id = ?').bind(userCityId).first()) as any;
     if (cityRow && cityRow.is_enabled !== 1 && cityRow.is_active !== 1) {
       cityStatus = 'paused';
       cityMessage = `Nearhood services in ${cityRow.name} are currently paused, but your account and profile data are completely safe.`;
@@ -407,6 +415,7 @@ async function handleVerifyOtp(c: any) {
       isNewUser,
       displayName: profileRow?.display_name || '',
       cityId: userCityId || 'GJ-VAD',
+      cityName: resolveCityName(userCityId) || (cityRow?.name || 'Vadodara'),
       areaId: userRow?.area_id || profileRow?.home_area_id || '',
       areaName: profileRow?.home_area_name || '',
       areaConfirmed: isAreaConfirmed,
@@ -504,36 +513,25 @@ async function handleClaimHandle(c: any) {
       ).bind(homeAreaId, homeAreaId).first()) as any;
 
       if (!fallbackRow) {
-        return c.json({ success: false, error: 'The selected area does not exist. Please choose an area from the search list.' }, 400);
+        const master = findMasterCity(resolvedCityId);
+        if (master) {
+          resolvedCityId = master.id;
+          resolvedAreaId = homeAreaId || `${master.id}-GENERAL`;
+          resolvedAreaName = homeAreaName || master.name;
+        } else {
+          resolvedCityId = homeCityId || 'GJ-VAD';
+          resolvedAreaId = homeAreaId || 'AREA-USER';
+          resolvedAreaName = homeAreaName || 'General';
+        }
+      } else {
+        resolvedCityId = fallbackRow.city_id;
+        resolvedAreaId = fallbackRow.id;
+        resolvedAreaName = fallbackRow.name;
       }
-      const isEnabled = fallbackRow.is_enabled ?? fallbackRow.is_active ?? 0;
-      if (isEnabled !== 1) {
-        return c.json({ success: false, error: `Nearhood is not yet live in ${fallbackRow.city_name || 'this city'}.` }, 400);
-      }
-      resolvedCityId = fallbackRow.city_id;
-      resolvedAreaId = fallbackRow.id;
-      resolvedAreaName = fallbackRow.name;
     } else {
-      const isEnabled = areaRow.is_enabled ?? areaRow.is_active ?? 0;
-      if (isEnabled !== 1) {
-        return c.json({ success: false, error: `Nearhood is not yet live in ${areaRow.city_name || 'this city'}.` }, 400);
-      }
       resolvedCityId = areaRow.city_id;
       resolvedAreaId = areaRow.id;
       resolvedAreaName = areaRow.name;
-    }
-  }
-
-  if (resolvedCityId) {
-    const cityRow = (await db.prepare(
-      'SELECT id, name, is_enabled, is_active FROM cities WHERE id = ? LIMIT 1'
-    ).bind(resolvedCityId).first()) as any;
-
-    if (cityRow) {
-      const isCityEnabled = cityRow.is_enabled ?? cityRow.is_active ?? 0;
-      if (isCityEnabled !== 1) {
-        return c.json({ success: false, error: `Nearhood is not yet live in ${cityRow.name || 'this city'}.` }, 400);
-      }
     }
   }
 
@@ -1059,8 +1057,9 @@ authApp.get('/me', authMiddleware, async (c) => {
   let cityStatus = 'active';
   let cityMessage = '';
   const cityId = userRow?.city_id || profile?.home_city_id;
+  let cityRow: any = null;
   if (cityId) {
-    const cityRow = (await db.prepare('SELECT id, name, is_enabled, is_active FROM cities WHERE id = ?').bind(cityId).first()) as any;
+    cityRow = (await db.prepare('SELECT id, name, is_enabled, is_active FROM cities WHERE id = ?').bind(cityId).first()) as any;
     if (cityRow && cityRow.is_enabled !== 1 && cityRow.is_active !== 1) {
       cityStatus = 'paused';
       cityMessage = `Nearhood services in ${cityRow.name} are currently paused, but your account and profile data are completely safe.`;
@@ -1082,6 +1081,7 @@ authApp.get('/me', authMiddleware, async (c) => {
       installationId: user.installationId,
       profile: safeProfile,
       cityId,
+      cityName: resolveCityName(cityId) || (cityRow?.name || 'Vadodara'),
       areaId: userRow?.area_id || profile?.home_area_id,
       areaName: profile?.home_area_name,
       areaConfirmed: isAreaConfirmed,
