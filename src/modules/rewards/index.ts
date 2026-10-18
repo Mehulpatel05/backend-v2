@@ -749,20 +749,175 @@ rewardsApp.post('/boost', authMiddleware, async (c) => {
   });
 });
 
+export const CURATED_SHOP_PERKS = [
+  {
+    id: 'perk_chai_10off',
+    shop_id: 'shop_apna_chai',
+    shop_name: 'Apna Chai & Cafe',
+    category: 'Food & Cafe',
+    logo_r2_path: '',
+    address: 'Nearhood Partner · Vadodara',
+    title: '10% OFF on Hot Beverages & Snacks',
+    cost_points: 50,
+    daily_limit: 10,
+    active: 1,
+    code_prefix: 'CHAI10',
+  },
+  {
+    id: 'perk_bakery_50off',
+    shop_id: 'shop_royal_bakery',
+    shop_name: 'Royal Bakeries & Confectionery',
+    category: 'Food & Cafe',
+    logo_r2_path: '',
+    address: 'Nearhood Partner · Vadodara',
+    title: '₹50 OFF on Cakes & Pastries (Min ₹200)',
+    cost_points: 100,
+    daily_limit: 10,
+    active: 1,
+    code_prefix: 'BAKE50',
+  },
+  {
+    id: 'perk_grocery_100off',
+    shop_id: 'shop_aone_mart',
+    shop_name: 'A-One Daily Mart & Groceries',
+    category: 'Groceries',
+    logo_r2_path: '',
+    address: 'Nearhood Partner · Vadodara',
+    title: '₹100 OFF on Daily Groceries (Min ₹500)',
+    cost_points: 150,
+    daily_limit: 10,
+    active: 1,
+    code_prefix: 'GROC100',
+  },
+  {
+    id: 'perk_delivery_free',
+    shop_id: 'shop_nh_delivery',
+    shop_name: 'Nearhood Express Delivery',
+    category: 'Services',
+    logo_r2_path: '',
+    address: 'Nearhood Community',
+    title: 'Free Home Delivery Voucher',
+    cost_points: 40,
+    daily_limit: 15,
+    active: 1,
+    code_prefix: 'FREEDEL',
+  },
+  {
+    id: 'perk_salon_100off',
+    shop_id: 'shop_glamour_salon',
+    shop_name: 'Glamour Unisex Salon & Spa',
+    category: 'Services',
+    logo_r2_path: '',
+    address: 'Nearhood Partner · Vadodara',
+    title: 'Flat ₹100 OFF on Salon Services',
+    cost_points: 180,
+    daily_limit: 10,
+    active: 1,
+    code_prefix: 'GLAM100',
+  },
+  {
+    id: 'perk_pharmacy_15off',
+    shop_id: 'shop_city_pharmacy',
+    shop_name: 'City Care Medicos & Pharmacy',
+    category: 'Healthcare',
+    logo_r2_path: '',
+    address: 'Nearhood Partner · Vadodara',
+    title: '15% OFF on Wellness & Healthcare',
+    cost_points: 120,
+    daily_limit: 10,
+    active: 1,
+    code_prefix: 'MED15',
+  },
+  {
+    id: 'perk_dining_150off',
+    shop_id: 'shop_taste_punjab',
+    shop_name: 'Taste of Punjab Family Restaurant',
+    category: 'Food & Cafe',
+    logo_r2_path: '',
+    address: 'Nearhood Partner · Vadodara',
+    title: '₹150 OFF on Family Dinner (Min ₹750)',
+    cost_points: 250,
+    daily_limit: 5,
+    active: 1,
+    code_prefix: 'DINE150',
+  },
+  {
+    id: 'perk_bazar_boost',
+    shop_id: 'shop_nh_bazar',
+    shop_name: 'Nearhood Community Bazar',
+    category: 'Bazar Boost',
+    logo_r2_path: '',
+    address: 'Nearhood Community',
+    title: '24-Hour Listing Boost in Bazar',
+    cost_points: 300,
+    daily_limit: 5,
+    active: 1,
+    code_prefix: 'BOOST24',
+  },
+];
+
 rewardsApp.get('/perks', authMiddleware, async (c) => {
   const db = getDatabase(c);
-  const perks = (await db.prepare(`
-    SELECT sc.*, bs.shop_name, bs.category, bs.logo_r2_path, bs.address
-    FROM shop_coupons sc
-    JOIN bazar_shops bs ON sc.shop_id = bs.id
-    WHERE sc.active = 1
-    ORDER BY sc.created_at DESC
-  `).all()) as any;
+  let dbPerks: any[] = [];
+  try {
+    const perksRes = (await db.prepare(`
+      SELECT sc.*, bs.shop_name, bs.category, bs.logo_r2_path, bs.address
+      FROM shop_coupons sc
+      JOIN bazar_shops bs ON sc.shop_id = bs.id
+      WHERE sc.active = 1
+      ORDER BY sc.created_at DESC
+    `).all()) as any;
+    dbPerks = perksRes.results || [];
+  } catch (_) {}
+
+  const seenIds = new Set(dbPerks.map((p: any) => p.id));
+  const combined = [...dbPerks];
+  for (const perk of CURATED_SHOP_PERKS) {
+    if (!seenIds.has(perk.id)) {
+      combined.push(perk);
+    }
+  }
 
   return c.json({
     success: true,
-    perks: perks.results || [],
+    perks: combined,
   });
+});
+
+rewardsApp.get('/my-coupons', authMiddleware, async (c) => {
+  const user = c.get('user');
+  const clean = (user.userHandle || '').replace(/^@+/, '').trim();
+  const db = getDatabase(c);
+
+  try {
+    const rows = (await db.prepare(`
+      SELECT uc.id, uc.code, uc.coupon_id, uc.expires_at, uc.status, uc.created_at
+      FROM user_coupons uc
+      WHERE uc.user_handle = ? OR uc.user_handle = ?
+      ORDER BY uc.created_at DESC
+    `).bind(clean, `@${clean}`).all()) as any;
+
+    const list = (rows.results || []).map((row: any) => {
+      const match = CURATED_SHOP_PERKS.find(p => p.id === row.coupon_id);
+      return {
+        id: row.id,
+        code: row.code,
+        title: match ? match.title : 'Shop Discount Coupon',
+        expiresAt: row.expires_at,
+        status: row.status,
+      };
+    });
+
+    return c.json({
+      success: true,
+      coupons: list,
+    });
+  } catch (_) {
+    return c.json({
+      success: true,
+      coupons: [],
+    });
+  }
 });
 
 rewardsApp.post('/coupons/unlock', authMiddleware, async (c) => {
@@ -776,27 +931,34 @@ rewardsApp.post('/coupons/unlock', authMiddleware, async (c) => {
     return c.json({ success: false, error: 'Coupon ID is required' }, 400);
   }
 
-  const coupon = (await db.prepare('SELECT * FROM shop_coupons WHERE id = ? AND active = 1')
-    .bind(couponId).first()) as any;
-  if (!coupon) {
+  let couponTitle = '';
+  let cost = 100;
+  let codePrefix = 'PERK';
+
+  let dbCoupon: any = null;
+  try {
+    dbCoupon = (await db.prepare('SELECT * FROM shop_coupons WHERE id = ? AND active = 1')
+      .bind(couponId).first()) as any;
+  } catch (_) {}
+
+  const curated = CURATED_SHOP_PERKS.find(p => p.id === couponId);
+
+  if (!dbCoupon && !curated) {
     return c.json({ success: false, error: 'Coupon not found or inactive' }, 404);
   }
 
-  if (coupon.expires_at && new Date(coupon.expires_at).getTime() < Date.now()) {
-    return c.json({ success: false, error: 'This coupon has expired' }, 400);
-  }
-
-  if (coupon.daily_limit && coupon.daily_limit > 0) {
-    const todayUnlocks = (await db.prepare(`
-      SELECT COUNT(*) as cnt FROM user_coupons
-      WHERE coupon_id = ? AND date(created_at) = date('now')
-    `).bind(couponId).first()) as any;
-    if ((todayUnlocks?.cnt || 0) >= coupon.daily_limit) {
-      return c.json({ success: false, error: 'Daily limit for this coupon has been reached for today.' }, 400);
+  if (dbCoupon) {
+    if (dbCoupon.expires_at && new Date(dbCoupon.expires_at).getTime() < Date.now()) {
+      return c.json({ success: false, error: 'This coupon has expired' }, 400);
     }
+    couponTitle = dbCoupon.title;
+    cost = dbCoupon.cost_points || 100;
+  } else if (curated) {
+    couponTitle = curated.title;
+    cost = curated.cost_points;
+    codePrefix = curated.code_prefix;
   }
 
-  const cost = coupon.cost_points || 100;
   await getOrCreateUserRewards(db, clean);
 
   const deductRes = await db.prepare(
@@ -808,7 +970,7 @@ rewardsApp.post('/coupons/unlock', authMiddleware, async (c) => {
   }
 
   const userCouponId = `uc_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
-  const code = `NH-${Math.random().toString(36).substring(2, 7).toUpperCase()}`;
+  const code = `NH-${codePrefix}-${Math.random().toString(36).substring(2, 6).toUpperCase()}`;
   const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
 
   try {
@@ -820,7 +982,7 @@ rewardsApp.post('/coupons/unlock', authMiddleware, async (c) => {
     await db.prepare(`
       INSERT INTO points_ledger (id, user_handle, delta, reason, ref_type, ref_id)
       VALUES (?, ?, ?, ?, 'coupon', ?)
-    `).bind(`pl_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`, clean, -cost, `Unlocked ${coupon.title} coupon`, userCouponId).run();
+    `).bind(`pl_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`, clean, -cost, `Unlocked ${couponTitle} coupon`, userCouponId).run();
   } catch (err) {
     await db.prepare('UPDATE user_rewards SET balance = balance + ? WHERE user_handle = ?').bind(cost, clean).run().catch(() => {});
     return c.json({ success: false, error: 'Could not unlock coupon. Points have been refunded.' }, 500);
@@ -831,7 +993,7 @@ rewardsApp.post('/coupons/unlock', authMiddleware, async (c) => {
     coupon: {
       id: userCouponId,
       code,
-      title: coupon.title,
+      title: couponTitle,
       expiresAt,
     },
   });
