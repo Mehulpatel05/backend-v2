@@ -80,6 +80,30 @@ adminApp.get('/stats', async (c) => {
   try {
     const totalUsers = (await db.prepare('SELECT COUNT(*) as cnt FROM users').first()) as any;
     const activeUsers = (await db.prepare("SELECT COUNT(DISTINCT user_handle) as cnt FROM devices WHERE last_seen_at >= datetime('now', '-1 day')").first()) as any;
+    const activeUsersWeek = (await db.prepare("SELECT COUNT(DISTINCT user_handle) as cnt FROM devices WHERE last_seen_at >= datetime('now', '-7 days')").first()) as any;
+    const activeUsersMonth = (await db.prepare("SELECT COUNT(DISTINCT user_handle) as cnt FROM devices WHERE last_seen_at >= datetime('now', '-30 days')").first()) as any;
+
+    const newUsersToday = (await db.prepare("SELECT COUNT(*) as cnt FROM users WHERE created_at >= datetime('now', '-1 day')").first()) as any;
+    const newUsersWeek = (await db.prepare("SELECT COUNT(*) as cnt FROM users WHERE created_at >= datetime('now', '-7 days')").first()) as any;
+
+    const returningUsersToday = (await db.prepare(`
+      SELECT COUNT(DISTINCT d.user_handle) as cnt 
+      FROM devices d 
+      JOIN users u ON u.handle = d.user_handle 
+      WHERE d.last_seen_at >= datetime('now', '-1 day') 
+        AND u.created_at < datetime('now', '-1 day')
+    `).first()) as any;
+
+    const returningUsersWeek = (await db.prepare(`
+      SELECT COUNT(DISTINCT d.user_handle) as cnt 
+      FROM devices d 
+      JOIN users u ON u.handle = d.user_handle 
+      WHERE d.last_seen_at >= datetime('now', '-7 days') 
+        AND u.created_at < datetime('now', '-7 days')
+    `).first()) as any;
+
+    const waitlistCount = (await db.prepare("SELECT COUNT(*) as cnt FROM waitlist").first().catch(() => ({ cnt: 0 }))) as any;
+
     const totalPosts = (await db.prepare("SELECT COUNT(*) as cnt FROM feed_posts WHERE status = 'active'").first()) as any;
     const reportedPosts = (await db.prepare("SELECT COUNT(*) as cnt FROM feed_posts WHERE report_count > 0 AND status = 'active'").first()) as any;
     const totalTickets = (await db.prepare('SELECT COUNT(*) as cnt FROM user_feedback').first()) as any;
@@ -88,7 +112,7 @@ adminApp.get('/stats', async (c) => {
 
     const areaBreakdown = (await db.prepare(`
       SELECT 
-        COALESCE(NULLIF(area_name, ''), 'Vadodara General') as area, 
+        COALESCE(NULLIF(area_name, ''), 'General Area') as area, 
         COUNT(*) as count 
       FROM feed_posts 
       WHERE status = 'active' 
@@ -97,6 +121,15 @@ adminApp.get('/stats', async (c) => {
       LIMIT 8
     `).all()) as any;
 
+    const cityBreakdown = (await db.prepare(`
+      SELECT 
+        COALESCE(NULLIF(home_city_id, ''), 'GJ-VAD') as city, 
+        COUNT(*) as count 
+      FROM profiles 
+      GROUP BY city 
+      ORDER BY count DESC
+    `).all().catch(() => ({ results: [] }))) as any;
+
     const recentActivity = (await db.prepare(`
       SELECT 'post' as type, id, author_handle as user, content as detail, created_at 
       FROM feed_posts 
@@ -104,18 +137,35 @@ adminApp.get('/stats', async (c) => {
       LIMIT 6
     `).all()) as any;
 
+    const totUsers = totalUsers?.cnt ?? 0;
+    const retWeek = returningUsersWeek?.cnt ?? 0;
+    const nWeek = newUsersWeek?.cnt ?? 0;
+    const eligibleForRetention = Math.max(totUsers - nWeek, 1);
+    const retentionRate = totUsers > 0 ? Math.round((retWeek / eligibleForRetention) * 100) : 0;
+    const stickinessRatio = (activeUsersMonth?.cnt || 0) > 0 ? Math.round(((activeUsers?.cnt || 0) / (activeUsersMonth?.cnt || 1)) * 100) : 0;
+
     return c.json({
       success: true,
       data: {
         city: 'Vadodara',
-        totalUsers: totalUsers?.cnt ?? 0,
+        totalUsers: totUsers,
         activeUsersToday: activeUsers?.cnt ?? 0,
+        activeUsersWeek: activeUsersWeek?.cnt ?? 0,
+        activeUsersMonth: activeUsersMonth?.cnt ?? 0,
+        newUsersToday: newUsersToday?.cnt ?? 0,
+        newUsersWeek: nWeek,
+        returningUsersToday: returningUsersToday?.cnt ?? 0,
+        returningUsersWeek: retWeek,
+        retentionRate: retentionRate,
+        stickinessRatio: stickinessRatio,
+        totalWaitlist: waitlistCount?.cnt ?? 0,
         totalPosts: totalPosts?.cnt ?? 0,
         reportedPosts: reportedPosts?.cnt ?? 0,
         openTickets: totalTickets?.cnt ?? 0,
         totalShops: totalShops?.cnt ?? 0,
         pendingShops: pendingShops?.cnt ?? 0,
         areaBreakdown: areaBreakdown?.results || [],
+        cityBreakdown: cityBreakdown?.results || [],
         recentActivity: recentActivity?.results || [],
       },
     });
@@ -347,7 +397,10 @@ adminApp.get('/users', async (c) => {
         COALESCE(pr.display_name, u.handle) as display_name,
         COALESCE(pr.bio, '') as bio,
         COALESCE(pr.avatar_r2_path, '') as avatar_r2_path,
+        COALESCE(pr.home_city_id, 'GJ-VAD') as home_city_id,
+        COALESCE(pr.home_area_name, '') as home_area_name,
         (SELECT COUNT(*) FROM feed_posts WHERE author_handle = u.handle) as post_count,
+        (SELECT MAX(last_seen_at) FROM devices WHERE user_handle = u.handle) as last_seen_at,
         (SELECT COUNT(*) FROM devices WHERE user_handle = u.handle AND revoked_at IS NOT NULL) as revoked_device_count
       FROM users u
       LEFT JOIN profiles pr ON pr.handle = u.handle OR pr.handle = '@' || u.handle
@@ -366,10 +419,19 @@ adminApp.get('/users', async (c) => {
     if (params.length > 0) stmt = stmt.bind(...params);
     const result = (await stmt.all()) as any;
 
-    const users = (result.results || []).map((u: any) => ({
-      ...u,
-      isBanned: (u.revoked_device_count || 0) > 0,
-    }));
+    const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const users = (result.results || []).map((u: any) => {
+      const lastSeen = u.last_seen_at ? new Date(u.last_seen_at) : null;
+      const createdAt = u.created_at ? new Date(u.created_at) : new Date();
+      const isActiveToday = lastSeen ? lastSeen >= oneDayAgo : false;
+      const isReturning = isActiveToday && createdAt < oneDayAgo;
+      return {
+        ...u,
+        isBanned: (u.revoked_device_count || 0) > 0,
+        is_active_today: isActiveToday,
+        is_returning: isReturning,
+      };
+    });
 
     return c.json({ success: true, users });
   } catch (e: any) {

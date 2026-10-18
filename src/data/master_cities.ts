@@ -316,3 +316,21 @@ export function generateFallbackAreas(cityName: string, cityId: string): MasterA
     { id: `${slug}-HIGHWAY`, name: `Ring Road / Highway Zone` },
   ];
 }
+
+export const LIVE_CITY_IDS = ['GJ-VAD', 'RJ-JAI', 'RJ-JDH', 'RJ-UDR', 'RJ-KOT'];
+export const LIVE_CITY_NAMES = ['vadodara', 'jaipur', 'jodhpur', 'udaipur', 'kota'];
+
+export function isLiveCity(cityId?: string | null, cityName?: string | null): boolean {
+  if (!cityId && !cityName) return false;
+  const cleanId = (cityId || '').trim().toUpperCase();
+  if (LIVE_CITY_IDS.includes(cleanId)) return true;
+  const cleanName = (cityName || '').trim().toLowerCase();
+  if (LIVE_CITY_NAMES.includes(cleanName)) return true;
+  for (const n of LIVE_CITY_NAMES) {
+    if (cleanName.includes(n) || n.includes(cleanName)) {
+      if (cleanName.length >= 4) return true;
+    }
+  }
+  return false;
+}
+

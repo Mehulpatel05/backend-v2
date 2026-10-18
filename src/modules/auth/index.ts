@@ -6,7 +6,7 @@ import { AppConfig } from '../../utils/config';
 import { WakitService } from '../../services/wakit_service';
 import { Fast2SmsService } from '../../services/fast2sms_service';
 import { orchestrateAccountDeletion } from '../account_deletion';
-import { findMasterCity } from '../../data/master_cities';
+import { findMasterCity, isLiveCity } from '../../data/master_cities';
 
 const authApp = new Hono<{ Bindings: Env; Variables: Variables }>();
 
@@ -484,6 +484,7 @@ async function handleClaimHandle(c: any) {
   }
 
   const homeCityId = String(body.home_city_id || body.cityId || body.city_id || 'GJ-VAD').trim();
+  const homeCityName = String(body.home_city_name || body.cityName || body.city_name || '').trim();
   const homeAreaId = String(body.home_area_id || body.areaId || body.area_id || '').trim();
   const homeAreaName = String(body.home_area_name || body.areaName || body.area_name || '').trim();
   const addressNote = String(body.address_note || body.addressNote || '').trim();
@@ -495,9 +496,11 @@ async function handleClaimHandle(c: any) {
   let resolvedCityId = homeCityId;
   let resolvedAreaId = homeAreaId;
   let resolvedAreaName = homeAreaName;
+  let areaRow: any = null;
+  let fallbackRow: any = null;
 
   if (homeAreaId) {
-    const areaRow = (await db.prepare(
+    areaRow = (await db.prepare(
       `SELECT a.id, a.name, a.city_id, c.is_enabled, c.is_active, c.name as city_name
        FROM areas a
        JOIN cities c ON c.id = a.city_id
@@ -505,7 +508,7 @@ async function handleClaimHandle(c: any) {
     ).bind(homeAreaId, homeAreaId).first()) as any;
 
     if (!areaRow) {
-      const fallbackRow = (await db.prepare(
+      fallbackRow = (await db.prepare(
         `SELECT ca.id, ca.name, ca.city_id, c.is_enabled, c.is_active, c.name as city_name
          FROM city_areas ca
          JOIN cities c ON c.id = ca.city_id
@@ -533,6 +536,22 @@ async function handleClaimHandle(c: any) {
       resolvedAreaId = areaRow.id;
       resolvedAreaName = areaRow.name;
     }
+  }
+
+  const effectiveCityName = homeCityName || areaRow?.city_name || fallbackRow?.city_name || resolveCityName(resolvedCityId);
+  if (!isLiveCity(resolvedCityId, effectiveCityName)) {
+    try {
+      await db.prepare(
+        `INSERT INTO waitlist (id, city_text, contact_or_device_id, status, created_at)
+         VALUES (?, ?, ?, 'pending', CURRENT_TIMESTAMP)`
+      ).bind(crypto.randomUUID(), effectiveCityName || resolvedCityId, currentUserHandle || newHandle || 'unknown').run();
+    } catch (_) {}
+
+    return c.json({
+      success: false,
+      isWaitlisted: true,
+      error: `Nearhood is currently live in Vadodara, Jaipur, Jodhpur, Udaipur, and Kota. We will come to ${effectiveCityName || 'your city'} soon! You have been added to our waitlist.`
+    }, 400);
   }
 
   try {
@@ -704,6 +723,16 @@ async function handleConfirmArea(c: any) {
        JOIN cities c ON c.id = a.city_id
        WHERE a.id = ?`
     ).bind(newAreaId).first()) as any;
+
+    const effectiveCityId = (body.city_id || body.cityId || areaRow?.city_id || '').trim();
+    const effectiveCityName = (body.city_name || body.cityName || areaRow?.city_name || '').trim();
+    if (!isLiveCity(effectiveCityId, effectiveCityName)) {
+      return c.json({
+        success: false,
+        isWaitlisted: true,
+        error: `Nearhood is currently live in Vadodara, Jaipur, Jodhpur, Udaipur, and Kota. We will come to ${effectiveCityName || 'your city'} soon!`,
+      }, 400);
+    }
 
     if (!areaRow || (areaRow.is_enabled !== 1 && areaRow.is_active !== 1)) {
       return c.json({ success: false, error: 'The selected area is not valid or not yet live.' }, 400);
