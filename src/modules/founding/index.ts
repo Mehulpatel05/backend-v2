@@ -12,11 +12,18 @@ const CITY_NAMES: Record<string, string> = {
   'GJ-VAD': 'Vadodara',
   'GJ-SRT': 'Surat',
   'GJ-AMD': 'Ahmedabad',
+  'GJ-RJT': 'Rajkot',
   'MH-MUM': 'Mumbai',
   'MH-PUN': 'Pune',
   'DL-DEL': 'Delhi',
   'KA-BLR': 'Bangalore',
   'TS-HYD': 'Hyderabad',
+  'RJ-JAI': 'Jaipur',
+  'RJ-JDH': 'Jodhpur',
+  'RJ-UDR': 'Udaipur',
+  'RJ-KOT': 'Kota',
+  'UP-LKO': 'Lucknow',
+  'MP-IND': 'Indore',
 };
 
 const AREA_NAMES: Record<string, string> = {
@@ -48,7 +55,10 @@ function getAreaName(areaId: string): string {
 }
 
 function getCityName(cityId: string): string {
-  return CITY_NAMES[cityId] || cityId;
+  if (CITY_NAMES[cityId]) return CITY_NAMES[cityId];
+  const master = findMasterCity(cityId);
+  if (master) return master.name;
+  return cityId;
 }
 
 // ── USER ROUTES ─────────────────────────────────────────────────────────────
@@ -81,8 +91,8 @@ foundingApp.get('/counts', async (c) => {
 foundingApp.get('/me', authMiddleware, async (c) => {
   const user = c.get('user');
   const userHandle = (user?.userHandle || '').replace(/^@+/, '').trim().toLowerCase();
-  const cityId = (c.req.query('city_id') || c.req.query('cityId') || 'GJ-VAD').trim();
-  const areaId = (c.req.query('area_id') || c.req.query('areaId') || '').trim();
+  let cityId = (c.req.query('city_id') || c.req.query('cityId') || '').trim();
+  let areaId = (c.req.query('area_id') || c.req.query('areaId') || '').trim();
   const db = getDatabase(c);
 
   if (!userHandle) {
@@ -90,6 +100,19 @@ foundingApp.get('/me', authMiddleware, async (c) => {
   }
 
   try {
+    if (!cityId) {
+      const profile = (await db.prepare(
+        'SELECT home_city_id, home_area_id FROM profiles WHERE LOWER(handle) = LOWER(?) OR LOWER(handle) = LOWER(?) LIMIT 1'
+      ).bind(userHandle, `@${userHandle}`).first()) as any;
+      if (profile?.home_city_id) {
+        cityId = profile.home_city_id;
+        if (!areaId && profile.home_area_id) {
+          areaId = profile.home_area_id;
+        }
+      } else {
+        cityId = 'GJ-VAD';
+      }
+    }
     const founderRow = (await db.prepare(
       'SELECT * FROM area_founders WHERE LOWER(user_id) = ? OR LOWER(user_id) = ?'
     ).bind(userHandle, `@${userHandle}`).first()) as any;
@@ -197,8 +220,8 @@ foundingApp.post('/request', authMiddleware, async (c) => {
   const user = c.get('user');
   const userHandle = (user?.userHandle || '').replace(/^@+/, '').trim().toLowerCase();
   const body = await c.req.json().catch(() => ({}));
-  const cityId = (body.city_id || body.cityId || 'GJ-VAD').trim();
-  const areaId = (body.area_id || body.areaId || '').trim();
+  let cityId = (body.city_id || body.cityId || '').trim();
+  let areaId = (body.area_id || body.areaId || '').trim();
   const db = getDatabase(c);
 
   if (!userHandle) {
@@ -206,6 +229,19 @@ foundingApp.post('/request', authMiddleware, async (c) => {
   }
 
   try {
+    if (!cityId) {
+      const profile = (await db.prepare(
+        'SELECT home_city_id, home_area_id FROM profiles WHERE LOWER(handle) = LOWER(?) OR LOWER(handle) = LOWER(?) LIMIT 1'
+      ).bind(userHandle, `@${userHandle}`).first()) as any;
+      if (profile?.home_city_id) {
+        cityId = profile.home_city_id;
+        if (!areaId && profile.home_area_id) {
+          areaId = profile.home_area_id;
+        }
+      } else {
+        cityId = 'GJ-VAD';
+      }
+    }
     const postRow = (await db.prepare(`
       SELECT COUNT(*) as cnt FROM feed_posts 
       WHERE (LOWER(author_handle) = ? OR LOWER(author_handle) = ?) 
