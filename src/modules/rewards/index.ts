@@ -18,6 +18,7 @@ export const DAILY_VOTES_LIMIT = 5;
 export const DAILY_LISTINGS_LIMIT = 3;
 export const MONTHLY_INVITES_LIMIT = 5;
 export const STREAK_BONUS_POINTS = 30;
+export const DAILY_STREAK_REWARDS = [5, 10, 15, 10, 15, 20, 30];
 export const BOOST_COST = 300;
 
 const rewardsRateMap = new Map<string, { count: number; resetTime: number }>();
@@ -335,42 +336,24 @@ rewardsApp.get('/me', authMiddleware, async (c) => {
 
   const today = getTodayString(rewards.timezone_offset || 5.5);
   const yesterday = getYesterdayString(rewards.timezone_offset || 5.5);
-  let streakCount = rewards.streak_count || 0;
-  let streakAwarded = false;
 
-  if (rewards.last_streak_date !== today) {
-    if (rewards.last_streak_date === yesterday) {
-      if ((rewards.streak_count || 0) >= 7) {
-        streakCount = 1;
-      } else {
-        streakCount = (rewards.streak_count || 0) + 1;
-      }
-    } else {
-      streakCount = 1;
-    }
+  const isStreakClaimedToday = rewards.last_streak_date === today;
+  let activeStreakCount = rewards.streak_count || 0;
+  let nextStreakDay = 1;
+  let todayStreakPoints = DAILY_STREAK_REWARDS[0];
 
-    let extraPoints = 0;
-    if (streakCount === 7) {
-      extraPoints = STREAK_BONUS_POINTS;
-      streakAwarded = true;
-    }
-
-    const savedStreak = streakCount === 7 ? 0 : streakCount;
-    await db.prepare('UPDATE user_rewards SET streak_count = ?, last_streak_date = ? WHERE user_handle = ?')
-      .bind(savedStreak, today, clean).run();
-
-    if (extraPoints > 0) {
-      await awardPoints(db, {
-        userHandle: clean,
-        delta: extraPoints,
-        reason: '7-day streak loyalty bonus',
-        action: 'streak',
-        sourceId: `streak_${today}_${clean}`,
-        isAction: false,
-      });
-      rewards.balance = (rewards.balance || 0) + extraPoints;
-      rewards.lifetime_points = (rewards.lifetime_points || 0) + extraPoints;
-    }
+  if (isStreakClaimedToday) {
+    nextStreakDay = activeStreakCount >= 7 ? 1 : activeStreakCount + 1;
+    const streakIndex = Math.min(6, Math.max(0, activeStreakCount - 1));
+    todayStreakPoints = DAILY_STREAK_REWARDS[streakIndex] || 5;
+  } else if (rewards.last_streak_date === yesterday) {
+    nextStreakDay = activeStreakCount >= 7 ? 1 : activeStreakCount + 1;
+    const streakIndex = Math.min(6, Math.max(0, nextStreakDay - 1));
+    todayStreakPoints = DAILY_STREAK_REWARDS[streakIndex] || 5;
+  } else {
+    activeStreakCount = 0;
+    nextStreakDay = 1;
+    todayStreakPoints = DAILY_STREAK_REWARDS[0];
   }
 
   const matureListings = await db.prepare(`
@@ -443,8 +426,12 @@ rewardsApp.get('/me', authMiddleware, async (c) => {
       balance: rewards.balance,
       lifetimePoints: rewards.lifetime_points,
       weeklyPoints,
-      streakCount: streakCount,
-      streakAwarded,
+      streakCount: activeStreakCount,
+      streakAwarded: isStreakClaimedToday,
+      isStreakClaimedToday,
+      nextStreakDay,
+      todayStreakPoints,
+      streakRewards: DAILY_STREAK_REWARDS,
       dailyPointsToday: daily.daily_points || 0,
       dailyCap: DAILY_POINTS_CAP,
       isCapReached: (daily.daily_points || 0) >= DAILY_POINTS_CAP,
@@ -495,6 +482,61 @@ rewardsApp.get('/me', authMiddleware, async (c) => {
         nextGoalPoints,
         pointsToNextGoal,
       },
+    },
+  });
+});
+
+rewardsApp.post('/streak/claim', authMiddleware, async (c) => {
+  const user = c.get('user');
+  const clean = (user.userHandle || '').replace(/^@+/, '').trim();
+  const db = getDatabase(c);
+
+  const rewards = await getOrCreateUserRewards(db, clean);
+  const today = getTodayString(rewards.timezone_offset || 5.5);
+  const yesterday = getYesterdayString(rewards.timezone_offset || 5.5);
+
+  if (rewards.last_streak_date === today) {
+    return c.json({
+      success: false,
+      error: 'Daily streak reward already claimed for today',
+      alreadyClaimed: true,
+      streakCount: rewards.streak_count || 1,
+      balance: rewards.balance || 0,
+    }, 400);
+  }
+
+  let newStreak = 1;
+  if (rewards.last_streak_date === yesterday) {
+    newStreak = ((rewards.streak_count || 0) % 7) + 1;
+  } else {
+    newStreak = 1;
+  }
+
+  const pointsToAward = DAILY_STREAK_REWARDS[newStreak - 1] || 5;
+
+  await db.prepare('UPDATE user_rewards SET streak_count = ?, last_streak_date = ? WHERE user_handle = ?')
+    .bind(newStreak, today, clean).run();
+
+  const awardRes = await awardPoints(db, {
+    userHandle: clean,
+    delta: pointsToAward,
+    reason: `Day ${newStreak} daily streak reward (+${pointsToAward} coins)`,
+    action: 'streak',
+    sourceId: `streak_${today}_${clean}`,
+    isAction: false,
+  });
+
+  return c.json({
+    success: true,
+    data: {
+      streakCount: newStreak,
+      pointsAwarded: pointsToAward,
+      newBalance: awardRes.newBalance,
+      isStreakClaimedToday: true,
+      nextStreakDay: newStreak >= 7 ? 1 : newStreak + 1,
+      todayStreakPoints: pointsToAward,
+      streakRewards: DAILY_STREAK_REWARDS,
+      message: `Claimed Day ${newStreak} reward! +${pointsToAward} coins added.`,
     },
   });
 });
