@@ -7,6 +7,16 @@ import { reversePoints } from '../rewards/anti_abuse';
 
 const bazarApp = new Hono<{ Bindings: Env; Variables: Variables }>();
 
+function resolveShopCategoryIcon(category?: string | null): string {
+  const cat = (category || '').toLowerCase();
+  if (cat.includes('cloth') || cat.includes('tailor') || cat.includes('fashion')) return '🛍️';
+  if (cat.includes('mobile') || cat.includes('electronic')) return '📱';
+  if (cat.includes('cafe') || cat.includes('bakery') || cat.includes('food')) return '🍞';
+  if (cat.includes('salon') || cat.includes('beauty')) return '✂️';
+  if (cat.includes('kirana') || cat.includes('grocery') || cat.includes('general')) return '🛒';
+  return '🛍️';
+}
+
 // 1. Get Marketplace Listings (Feed)
 bazarApp.get('/listings', async (c) => {
   const { category, search, seller } = c.req.query();
@@ -464,7 +474,7 @@ bazarApp.get('/shops', async (c) => {
         shopName: row.shop_name,
         shop_name: row.shop_name,
         category: row.category,
-        categoryIcon: row.category === 'Pharmacy' ? '💊' : (row.category === 'Bakery' ? '🥐' : (row.category === 'Kirana' ? '🛒' : '🏪')),
+        categoryIcon: resolveShopCategoryIcon(row.category),
         location: row.address,
         address: row.address,
         phone: row.phone,
@@ -553,7 +563,7 @@ bazarApp.get('/shops/:id', async (c) => {
       shopName: shop.shop_name,
       shop_name: shop.shop_name,
       category: shop.category,
-      categoryIcon: shop.category === 'Pharmacy' ? '💊' : (shop.category === 'Bakery' ? '🥐' : (shop.category === 'Kirana' ? '🛒' : '🏪')),
+      categoryIcon: resolveShopCategoryIcon(shop.category),
       location: shop.address,
       address: shop.address,
       phone: shop.phone,
@@ -626,7 +636,7 @@ bazarApp.get('/my-shop', authMiddleware, async (c) => {
       id: shop.id,
       name: shop.shop_name,
       category: shop.category,
-      categoryIcon: shop.category === 'Pharmacy' ? '💊' : (shop.category === 'Bakery' ? '🥐' : (shop.category === 'Kirana' ? '🛒' : '🏪')),
+      categoryIcon: resolveShopCategoryIcon(shop.category),
       location: shop.address,
       phone: shop.phone,
       imageUrl: shop.logo_r2_path || shop.banner_r2_path || '',
