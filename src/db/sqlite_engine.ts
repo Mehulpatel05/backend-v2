@@ -186,7 +186,7 @@ CREATE TABLE IF NOT EXISTS bazar_shops (
     banner_r2_path TEXT DEFAULT '',
     logo_r2_path TEXT DEFAULT '',
     description TEXT DEFAULT '',
-    status TEXT DEFAULT 'active',
+    status TEXT DEFAULT 'pending',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(owner_handle) REFERENCES users(handle) ON DELETE CASCADE
 );
@@ -597,6 +597,22 @@ CREATE TABLE IF NOT EXISTS area_change_requests (
 
 CREATE INDEX IF NOT EXISTS idx_area_requests_user ON area_change_requests(user_handle, status);
 CREATE INDEX IF NOT EXISTS idx_area_requests_status ON area_change_requests(status, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS shop_deletion_requests (
+    id TEXT PRIMARY KEY,
+    shop_id TEXT NOT NULL,
+    owner_handle TEXT NOT NULL,
+    shop_name TEXT NOT NULL,
+    reason TEXT DEFAULT '',
+    status TEXT DEFAULT 'pending',
+    admin_notes TEXT DEFAULT '',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    reviewed_at TIMESTAMP NULL,
+    reviewed_by TEXT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_shop_deletion_owner ON shop_deletion_requests(owner_handle, status);
+CREATE INDEX IF NOT EXISTS idx_shop_deletion_status ON shop_deletion_requests(status, created_at DESC);
 `;
 
 let schemaInitPromise: Promise<void> | null = null;
@@ -744,6 +760,20 @@ export async function ensureSqliteSchema(): Promise<void> {
         'ALTER TABLE user_preferences ADD COLUMN keep_chats_archived INTEGER DEFAULT 0',
         'CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)',
         'INSERT OR IGNORE INTO app_settings (key, value) VALUES ("active_launcher_icon", "default")',
+        `CREATE TABLE IF NOT EXISTS shop_deletion_requests (
+            id TEXT PRIMARY KEY,
+            shop_id TEXT NOT NULL,
+            owner_handle TEXT NOT NULL,
+            shop_name TEXT NOT NULL,
+            reason TEXT DEFAULT '',
+            status TEXT DEFAULT 'pending',
+            admin_notes TEXT DEFAULT '',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            reviewed_at TIMESTAMP NULL,
+            reviewed_by TEXT NULL
+        )`,
+        'CREATE INDEX IF NOT EXISTS idx_shop_deletion_owner ON shop_deletion_requests(owner_handle, status)',
+        'CREATE INDEX IF NOT EXISTS idx_shop_deletion_status ON shop_deletion_requests(status, created_at DESC)',
       ];
 
       for (const m of migrations) {

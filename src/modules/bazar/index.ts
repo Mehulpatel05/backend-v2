@@ -353,12 +353,14 @@ bazarApp.post('/shops', authMiddleware, async (c) => {
   const cleanHandle = (user.userHandle || '').replace(/^@+/, '').trim();
   const shopId = `shop_${cleanHandle}`;
   const db = getDatabase(c);
+  const existingShop = (await db.prepare('SELECT status FROM bazar_shops WHERE id = ?').bind(shopId).first()) as any;
+  const initialStatus = existingShop?.status || 'pending';
 
   await db.prepare(
     `INSERT INTO bazar_shops (
       id, owner_handle, shop_name, category, address, phone,
       banner_r2_path, logo_r2_path, description, status
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       shop_name = excluded.shop_name,
       category = excluded.category,
@@ -377,7 +379,8 @@ bazarApp.post('/shops', authMiddleware, async (c) => {
       phone,
       bannerR2Path,
       logoR2Path,
-      description
+      description,
+      initialStatus
     )
     .run();
 
@@ -398,10 +401,10 @@ bazarApp.post('/shops', authMiddleware, async (c) => {
       homeDelivery: !!homeDelivery,
       sameWhatsapp: !!sameWhatsapp,
       isOpen: !!isOpen,
-      status: 'active',
+      status: initialStatus,
       isVerified: false,
     },
-    message: 'Shop registered successfully',
+    message: initialStatus === 'pending' ? 'Shop submitted for review' : 'Shop updated successfully',
   });
 });
 
@@ -573,7 +576,7 @@ bazarApp.get('/shops/:id', async (c) => {
       banner_r2_path: shop.banner_r2_path || '',
       description: shop.description || '',
       aboutText: shop.description || '',
-      status: shop.status || 'active',
+      status: shop.status || 'pending',
       isOpen: shop.status !== 'inactive',
       isVerified,
       is_verified: isVerified ? 1 : 0,
@@ -642,7 +645,7 @@ bazarApp.get('/my-shop', authMiddleware, async (c) => {
       imageUrl: shop.logo_r2_path || shop.banner_r2_path || '',
       bannerUrl: shop.banner_r2_path || '',
       description: shop.description || '',
-      status: shop.status || 'active',
+      status: shop.status || 'pending',
       isOpen: shop.status !== 'inactive',
       isVerified,
       is_verified: isVerified ? 1 : 0,
@@ -660,6 +663,103 @@ bazarApp.get('/my-shop', authMiddleware, async (c) => {
       }
     }
   });
+});
+
+bazarApp.post('/my-shop/deletion-request', authMiddleware, async (c) => {
+  const user = c.get('user');
+  const db = getDatabase(c);
+  const cleanHandle = user.userHandle.replace(/^@+/, '').trim();
+  const body = await c.req.json().catch(() => ({}));
+  const reason = String(body.reason || '').trim();
+
+  const shop = (await db.prepare(
+    `SELECT * FROM bazar_shops 
+     WHERE LOWER(owner_handle) = LOWER(?) OR LOWER(owner_handle) = '@' || LOWER(?) LIMIT 1`
+  )
+    .bind(cleanHandle, cleanHandle)
+    .first()) as any;
+
+  if (!shop) {
+    return c.json({ success: false, error: 'Shop not found' }, 404);
+  }
+
+  const pending = (await db.prepare(
+    `SELECT * FROM shop_deletion_requests 
+     WHERE shop_id = ? AND status = 'pending' LIMIT 1`
+  )
+    .bind(shop.id)
+    .first()) as any;
+
+  if (pending) {
+    return c.json({
+      success: true,
+      message: 'A deletion request is already under review for this shop',
+      request: pending,
+    });
+  }
+
+  const requestId = `del_req_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+  await db.prepare(
+    `INSERT INTO shop_deletion_requests (
+      id, shop_id, owner_handle, shop_name, reason, status
+    ) VALUES (?, ?, ?, ?, ?, 'pending')`
+  )
+    .bind(requestId, shop.id, cleanHandle, shop.shop_name, reason)
+    .run();
+
+  const newRequest = (await db.prepare(
+    'SELECT * FROM shop_deletion_requests WHERE id = ?'
+  ).bind(requestId).first()) as any;
+
+  return c.json({
+    success: true,
+    message: 'Shop deletion request submitted for admin review',
+    request: newRequest,
+  });
+});
+
+bazarApp.get('/my-shop/deletion-request', authMiddleware, async (c) => {
+  const user = c.get('user');
+  const db = getDatabase(c);
+  const cleanHandle = user.userHandle.replace(/^@+/, '').trim();
+
+  const shop = (await db.prepare(
+    `SELECT id FROM bazar_shops 
+     WHERE LOWER(owner_handle) = LOWER(?) OR LOWER(owner_handle) = '@' || LOWER(?) LIMIT 1`
+  )
+    .bind(cleanHandle, cleanHandle)
+    .first()) as any;
+
+  if (!shop) {
+    return c.json({ success: true, request: null });
+  }
+
+  const request = (await db.prepare(
+    `SELECT * FROM shop_deletion_requests 
+     WHERE shop_id = ? AND status = 'pending' 
+     ORDER BY created_at DESC LIMIT 1`
+  )
+    .bind(shop.id)
+    .first()) as any;
+
+  return c.json({ success: true, request: request || null });
+});
+
+bazarApp.delete('/my-shop/deletion-request', authMiddleware, async (c) => {
+  const user = c.get('user');
+  const db = getDatabase(c);
+  const cleanHandle = user.userHandle.replace(/^@+/, '').trim();
+
+  await db.prepare(
+    `UPDATE shop_deletion_requests 
+     SET status = 'cancelled' 
+     WHERE (LOWER(owner_handle) = LOWER(?) OR LOWER(owner_handle) = '@' || LOWER(?)) 
+       AND status = 'pending'`
+  )
+    .bind(cleanHandle, cleanHandle)
+    .run();
+
+  return c.json({ success: true, message: 'Shop deletion request cancelled' });
 });
 
 // 5.2 Update Shop Details

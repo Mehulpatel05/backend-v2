@@ -548,6 +548,85 @@ adminApp.patch('/shops/:id/status', async (c) => {
   }
 });
 
+adminApp.get('/shop-deletion-requests', async (c) => {
+  const db = getDatabase(c);
+  const status = c.req.query('status');
+
+  try {
+    let query = `
+      SELECT r.*, s.phone, s.category, s.address, s.status as shop_status
+      FROM shop_deletion_requests r
+      LEFT JOIN bazar_shops s ON r.shop_id = s.id
+    `;
+    const params: any[] = [];
+    if (status && status !== 'all') {
+      query += ' WHERE r.status = ?';
+      params.push(status);
+    }
+    query += ' ORDER BY r.created_at DESC LIMIT 50';
+
+    let stmt = db.prepare(query);
+    if (params.length > 0) stmt = stmt.bind(...params);
+    const result = (await stmt.all()) as any;
+
+    return c.json({ success: true, requests: result.results || [] });
+  } catch (e: any) {
+    return c.json({ success: false, error: e.message }, 500);
+  }
+});
+
+adminApp.post('/shop-deletion-requests/:id/approve', async (c) => {
+  const id = c.req.param('id');
+  const db = getDatabase(c);
+
+  try {
+    const request = (await db.prepare('SELECT * FROM shop_deletion_requests WHERE id = ?').bind(id).first()) as any;
+    if (!request) {
+      return c.json({ success: false, error: 'Deletion request not found' }, 404);
+    }
+
+    const shopId = request.shop_id;
+
+    await db.prepare(
+      `UPDATE shop_deletion_requests 
+       SET status = 'approved', reviewed_at = CURRENT_TIMESTAMP, reviewed_by = 'admin' 
+       WHERE id = ?`
+    ).bind(id).run();
+
+    await db.prepare('DELETE FROM bazar_listings WHERE shop_id = ?').bind(shopId).run();
+    await db.prepare('DELETE FROM bazar_saved_shops WHERE shop_id = ?').bind(shopId).run();
+    await db.prepare('DELETE FROM bazar_shops WHERE id = ?').bind(shopId).run();
+
+    return c.json({ success: true, message: 'Shop and all listings permanently deleted' });
+  } catch (e: any) {
+    return c.json({ success: false, error: e.message }, 500);
+  }
+});
+
+adminApp.post('/shop-deletion-requests/:id/reject', async (c) => {
+  const id = c.req.param('id');
+  const body = await c.req.json().catch(() => ({}));
+  const adminNotes = String(body.adminNotes || body.notes || '').trim();
+  const db = getDatabase(c);
+
+  try {
+    const request = (await db.prepare('SELECT * FROM shop_deletion_requests WHERE id = ?').bind(id).first()) as any;
+    if (!request) {
+      return c.json({ success: false, error: 'Deletion request not found' }, 404);
+    }
+
+    await db.prepare(
+      `UPDATE shop_deletion_requests 
+       SET status = 'rejected', admin_notes = ?, reviewed_at = CURRENT_TIMESTAMP, reviewed_by = 'admin' 
+       WHERE id = ?`
+    ).bind(adminNotes, id).run();
+
+    return c.json({ success: true, message: 'Shop deletion request rejected' });
+  } catch (e: any) {
+    return c.json({ success: false, error: e.message }, 500);
+  }
+});
+
 adminApp.post('/broadcast', async (c) => {
   const body = await c.req.json().catch(() => ({}));
   const title = body.title || 'Nearhood City Alert';
