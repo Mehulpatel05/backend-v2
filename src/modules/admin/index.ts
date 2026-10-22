@@ -1315,4 +1315,38 @@ adminApp.post('/assets/upload', adminAuthMiddleware, async (c) => {
   }
 });
 
+adminApp.get('/app-icon', async (c) => {
+  try {
+    const db = getDatabase(c);
+    const row = (await db.prepare('SELECT value, updated_at FROM app_settings WHERE key = ?').bind('active_launcher_icon').first()) as any;
+    return c.json({
+      success: true,
+      activeIcon: row?.value || 'default',
+      updatedAt: row?.updated_at || null,
+    });
+  } catch (err: any) {
+    return c.json({ success: false, error: err.message || 'Failed to fetch active icon' }, 500);
+  }
+});
+
+adminApp.post('/app-icon', async (c) => {
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const icon = String(body.icon || '').trim().toLowerCase();
+    const allowed = ['default', 'dark', 'festive'];
+    if (!allowed.includes(icon)) {
+      return c.json({ success: false, error: 'Invalid icon theme. Allowed: default, dark, festive' }, 400);
+    }
+
+    const db = getDatabase(c);
+    await db.prepare(
+      'INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES ("active_launcher_icon", ?, CURRENT_TIMESTAMP)'
+    ).bind(icon).run();
+
+    return c.json({ success: true, activeIcon: icon });
+  } catch (err: any) {
+    return c.json({ success: false, error: err.message || 'Failed to update app icon' }, 500);
+  }
+});
+
 export { adminApp };

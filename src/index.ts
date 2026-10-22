@@ -65,6 +65,19 @@ app.get('/', (c) => {
 app.get('/health', healthHandler);
 app.get('/api/v2/health', healthHandler);
 
+const handleGetAppIcon = async (c: any) => {
+  try {
+    const db = getDatabase(c);
+    const row = (await db.prepare('SELECT value FROM app_settings WHERE key = ?').bind('active_launcher_icon').first()) as any;
+    return c.json({ success: true, activeIcon: row?.value || 'default' });
+  } catch (_) {
+    return c.json({ success: true, activeIcon: 'default' });
+  }
+};
+
+app.get('/api/v2/system/app-icon', handleGetAppIcon);
+app.get('/system/app-icon', handleGetAppIcon);
+
 const handleFcmToken = async (c: any) => {
   const user = c.get('user');
   const body = await c.req.json().catch(() => ({}));

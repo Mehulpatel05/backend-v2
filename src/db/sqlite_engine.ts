@@ -516,6 +516,12 @@ CREATE TABLE IF NOT EXISTS admin_sessions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_admin_sessions_expiry ON admin_sessions(expires_at);
+
+CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
  
 CREATE TABLE IF NOT EXISTS cities (
     id TEXT PRIMARY KEY,
@@ -736,6 +742,8 @@ export async function ensureSqliteSchema(): Promise<void> {
         'ALTER TABLE user_preferences ADD COLUMN archived_timestamps_json TEXT DEFAULT "{}"',
         'ALTER TABLE user_preferences ADD COLUMN chat_preferences_json TEXT DEFAULT "{}"',
         'ALTER TABLE user_preferences ADD COLUMN keep_chats_archived INTEGER DEFAULT 0',
+        'CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)',
+        'INSERT OR IGNORE INTO app_settings (key, value) VALUES ("active_launcher_icon", "default")',
       ];
 
       for (const m of migrations) {
