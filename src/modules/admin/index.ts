@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import { S3Client, ListObjectsV2Command, DeleteObjectsCommand } from '@aws-sdk/client-s3';
+import { S3Client, ListObjectsV2Command, DeleteObjectsCommand, PutObjectCommand } from '@aws-sdk/client-s3';
 import { Env, Variables } from '../../types';
 import { adminAuthMiddleware, getAdminSecretKey, ADMIN_SESSION_TTL_HOURS } from '../../middleware/admin_auth';
 import { hashToken, timingSafeEqual } from '../../middleware/auth';
@@ -1008,6 +1008,310 @@ adminApp.post('/area-change-requests/:id/reject', async (c) => {
     });
   } catch (e: any) {
     return c.json({ success: false, error: e.message }, 500);
+  }
+});
+
+function getAdminS3Client(): S3Client {
+  return new S3Client({
+    region: 'auto',
+    endpoint: AppConfig.r2Endpoint,
+    credentials: {
+      accessKeyId: AppConfig.r2AccessKeyId,
+      secretAccessKey: AppConfig.r2SecretAccessKey,
+    },
+  });
+}
+
+function getAssetMimeType(filename: string): string {
+  const ext = filename.split('.').pop()?.toLowerCase() || '';
+  switch (ext) {
+    case 'webp': return 'image/webp';
+    case 'png': return 'image/png';
+    case 'svg': return 'image/svg+xml';
+    case 'jpg':
+    case 'jpeg': return 'image/jpeg';
+    case 'gif': return 'image/gif';
+    default: return 'application/octet-stream';
+  }
+}
+
+function getAssetPublicUrl(c: any, r2Key: string): string {
+  let base = AppConfig.publicBaseUrl;
+  if (!base) {
+    const rawHost = c.req.header('host') || '3.109.213.23';
+    const host = rawHost.replace(/:\d+$/, '');
+    const isIp = /^(?:\d{1,3}\.){3}\d{1,3}$/.test(host);
+    const protoHeader = c.req.header('x-forwarded-proto');
+    const protocol = protoHeader ? protoHeader : (isIp ? 'http' : 'https');
+    base = `${protocol}://${rawHost}`;
+  }
+  return `${base}/api/v2/media/file/${r2Key}`;
+}
+
+interface StaticAppAssetDefinition {
+  key: string;
+  name: string;
+  label: string;
+  category: 'splash' | 'branding' | 'banners' | 'icons';
+  description: string;
+  format: string;
+}
+
+const STATIC_APP_ASSETS: StaticAppAssetDefinition[] = [
+  {
+    key: 'static/nearhood_splash_background.webp',
+    name: 'nearhood_splash_background.webp',
+    label: 'Splash Screen Background (WebP)',
+    category: 'splash',
+    description: 'Main animated splash background image displayed during application launch',
+    format: 'image/webp',
+  },
+  {
+    key: 'static/nearhood_splash_background.png',
+    name: 'nearhood_splash_background.png',
+    label: 'Splash Screen Background (PNG)',
+    category: 'splash',
+    description: 'High-resolution PNG splash background fallback',
+    format: 'image/png',
+  },
+  {
+    key: 'static/nearhood_home_feed_header.webp',
+    name: 'nearhood_home_feed_header.webp',
+    label: 'Home Feed & Bazaar Header (WebP)',
+    category: 'banners',
+    description: 'Top header backdrop illustration for Home Feed and Bazaar',
+    format: 'image/webp',
+  },
+  {
+    key: 'static/nearhood_home_feed_header.png',
+    name: 'nearhood_home_feed_header.png',
+    label: 'Home Feed & Bazaar Header (PNG)',
+    category: 'banners',
+    description: 'PNG fallback for Home Feed and Bazaar header backdrop',
+    format: 'image/png',
+  },
+  {
+    key: 'static/nearhood_profile_city_header.webp',
+    name: 'nearhood_profile_city_header.webp',
+    label: 'Profile Header Backdrop (WebP)',
+    category: 'banners',
+    description: 'Palace and lake illustration displayed in user profile header backdrop',
+    format: 'image/webp',
+  },
+  {
+    key: 'static/nearhood_profile_city_header.png',
+    name: 'nearhood_profile_city_header.png',
+    label: 'Profile Header Backdrop (PNG)',
+    category: 'banners',
+    description: 'PNG fallback for user profile header backdrop',
+    format: 'image/png',
+  },
+  {
+    key: 'static/nearhood_profile_body_background.webp',
+    name: 'nearhood_profile_body_background.webp',
+    label: 'Profile Content Background (WebP)',
+    category: 'banners',
+    description: 'Soft pink background illustration for profile content section',
+    format: 'image/webp',
+  },
+  {
+    key: 'static/nearhood_profile_body_background.png',
+    name: 'nearhood_profile_body_background.png',
+    label: 'Profile Content Background (PNG)',
+    category: 'banners',
+    description: 'PNG fallback for profile content section background',
+    format: 'image/png',
+  },
+  {
+    key: 'static/nearhood_profile_banner_curved.png',
+    name: 'nearhood_profile_banner_curved.png',
+    label: 'Profile Curved Banner',
+    category: 'banners',
+    description: 'Curved hero shape banner for profile screens',
+    format: 'image/png',
+  },
+  {
+    key: 'static/nearhood_logo.png',
+    name: 'nearhood_logo.png',
+    label: 'Nearhood Brand Logo',
+    category: 'branding',
+    description: 'Official horizontal brand logo banner',
+    format: 'image/png',
+  },
+  {
+    key: 'static/nearhood_logo.svg',
+    name: 'nearhood_logo.svg',
+    label: 'Nearhood Brand Logo (SVG)',
+    category: 'branding',
+    description: 'Vector brand logo banner',
+    format: 'image/svg+xml',
+  },
+  {
+    key: 'static/nearhood_logo_pin.svg',
+    name: 'nearhood_logo_pin.svg',
+    label: 'Nearhood Location Pin Logo (SVG)',
+    category: 'branding',
+    description: 'Animated location pin logo vector',
+    format: 'image/svg+xml',
+  },
+  {
+    key: 'static/app_icon.png',
+    name: 'app_icon.png',
+    label: 'App Launcher Icon',
+    category: 'icons',
+    description: 'Primary square app icon',
+    format: 'image/png',
+  },
+  {
+    key: 'static/app_icon_rounded.png',
+    name: 'app_icon_rounded.png',
+    label: 'App Launcher Icon (Rounded)',
+    category: 'icons',
+    description: 'Android adaptive rounded launcher icon',
+    format: 'image/png',
+  },
+];
+
+adminApp.get('/assets', adminAuthMiddleware, async (c) => {
+  try {
+    const client = getAdminS3Client();
+    const bucket = AppConfig.r2Bucket || 'nearhood';
+    const listRes = await client.send(
+      new ListObjectsV2Command({
+        Bucket: bucket,
+        Prefix: 'static/',
+      })
+    );
+
+    const r2Map = new Map<string, { size: number; lastModified?: Date; etag?: string }>();
+    if (listRes.Contents) {
+      for (const obj of listRes.Contents) {
+        if (obj.Key) {
+          r2Map.set(obj.Key, {
+            size: obj.Size || 0,
+            lastModified: obj.LastModified,
+            etag: obj.ETag?.replace(/"/g, ''),
+          });
+        }
+      }
+    }
+
+    const assets = STATIC_APP_ASSETS.map((def) => {
+      const live = r2Map.get(def.key);
+      const url = getAssetPublicUrl(c, def.key);
+      const directR2Url = AppConfig.r2PublicUrl ? `${AppConfig.r2PublicUrl.replace(/\/+$/, '')}/${def.key}` : '';
+
+      return {
+        key: def.key,
+        name: def.name,
+        label: def.label,
+        category: def.category,
+        description: def.description,
+        format: def.format,
+        url,
+        directR2Url,
+        size: live ? live.size : 0,
+        lastModified: live?.lastModified ? live.lastModified.toISOString() : null,
+        etag: live?.etag || null,
+        existsInStorage: !!live,
+      };
+    });
+
+    return c.json({
+      success: true,
+      assets,
+      count: assets.length,
+      storagePrefix: 'static/',
+      bucket,
+    });
+  } catch (err: any) {
+    return c.json({ success: false, error: err.message || 'Failed to list assets' }, 500);
+  }
+});
+
+adminApp.post('/assets/upload', adminAuthMiddleware, async (c) => {
+  try {
+    const formData = (await c.req.parseBody().catch(() => ({}))) as Record<string, any>;
+    const file = formData['file'] || formData['image'] || formData['asset'];
+    let targetKey = String(formData['key'] || formData['assetName'] || '').trim();
+
+    if (!file || !(file instanceof File)) {
+      return c.json({ success: false, error: 'Valid file is required under "file" field' }, 400);
+    }
+
+    if (file.size > 25 * 1024 * 1024) {
+      return c.json({ success: false, error: 'File size exceeds 25MB limit' }, 400);
+    }
+
+    if (!targetKey) {
+      targetKey = file.name || `asset_${Date.now()}`;
+    }
+
+    const cleanFilename = targetKey.replace(/^(?:app\/)?static\//, '').replace(/[^a-zA-Z0-9._-]/g, '');
+    if (!cleanFilename) {
+      return c.json({ success: false, error: 'Invalid asset name' }, 400);
+    }
+
+    const primaryKey = `static/${cleanFilename}`;
+    const legacyAppKey = `app/static/${cleanFilename}`;
+    const contentType = getAssetMimeType(cleanFilename);
+    const arrayBuffer = await file.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+
+    if (c.env && c.env.MEDIA_BUCKET) {
+      await Promise.all([
+        c.env.MEDIA_BUCKET.put(primaryKey, arrayBuffer, {
+          httpMetadata: { contentType, cacheControl: 'public, max-age=31536000, immutable' },
+          customMetadata: { updatedBy: 'admin', updatedAt: new Date().toISOString() },
+        }),
+        c.env.MEDIA_BUCKET.put(legacyAppKey, arrayBuffer, {
+          httpMetadata: { contentType, cacheControl: 'public, max-age=31536000, immutable' },
+          customMetadata: { updatedBy: 'admin', updatedAt: new Date().toISOString() },
+        }),
+      ]);
+    } else {
+      const client = getAdminS3Client();
+      const bucket = AppConfig.r2Bucket || 'nearhood';
+      await Promise.all([
+        client.send(
+          new PutObjectCommand({
+            Bucket: bucket,
+            Key: primaryKey,
+            Body: buffer,
+            ContentType: contentType,
+            CacheControl: 'public, max-age=31536000, immutable',
+            Metadata: { updatedBy: 'admin', updatedAt: new Date().toISOString() },
+          })
+        ),
+        client.send(
+          new PutObjectCommand({
+            Bucket: bucket,
+            Key: legacyAppKey,
+            Body: buffer,
+            ContentType: contentType,
+            CacheControl: 'public, max-age=31536000, immutable',
+            Metadata: { updatedBy: 'admin', updatedAt: new Date().toISOString() },
+          })
+        ),
+      ]);
+    }
+
+    const publicUrl = getAssetPublicUrl(c, primaryKey);
+    const directR2Url = AppConfig.r2PublicUrl ? `${AppConfig.r2PublicUrl.replace(/\/+$/, '')}/${primaryKey}` : '';
+
+    return c.json({
+      success: true,
+      message: `Asset ${cleanFilename} updated successfully in Cloudflare R2`,
+      key: primaryKey,
+      filename: cleanFilename,
+      url: publicUrl,
+      directR2Url,
+      size: file.size,
+      contentType,
+      lastModified: new Date().toISOString(),
+    });
+  } catch (err: any) {
+    return c.json({ success: false, error: err.message || 'Failed to upload asset' }, 500);
   }
 });
 

@@ -208,7 +208,7 @@ mediaApp.get('/file/*', async (c) => {
     return c.json({ success: false, error: 'Invalid path' }, 400);
   }
 
-  const allowedPrefixes = ['users/', 'feed/', 'posts/', 'bazar/', 'profiles/', 'banners/', 'chat/', 'static/', 'misc/'];
+  const allowedPrefixes = ['users/', 'feed/', 'posts/', 'bazar/', 'profiles/', 'banners/', 'chat/', 'static/', 'app/static/', 'misc/'];
   const hasAllowedPrefix = allowedPrefixes.some((p) => path.startsWith(p));
   if (!hasAllowedPrefix) {
     return c.json({ success: false, error: 'Access denied: Unknown media location' }, 403);
