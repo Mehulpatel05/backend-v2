@@ -659,6 +659,24 @@ CREATE TABLE IF NOT EXISTS place_claim_requests (
 );
 
 CREATE INDEX IF NOT EXISTS idx_place_claims_status ON place_claim_requests(status, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS calls (
+    id TEXT PRIMARY KEY,
+    caller_handle TEXT NOT NULL,
+    receiver_handle TEXT NOT NULL,
+    call_type TEXT NOT NULL DEFAULT 'audio',
+    status TEXT NOT NULL DEFAULT 'calling',
+    sdp_offer TEXT NOT NULL DEFAULT '',
+    sdp_answer TEXT DEFAULT '',
+    caller_candidates_json TEXT DEFAULT '[]',
+    receiver_candidates_json TEXT DEFAULT '[]',
+    duration_seconds INTEGER DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    ended_at TIMESTAMP NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_calls_receiver ON calls(receiver_handle, status);
+CREATE INDEX IF NOT EXISTS idx_calls_caller ON calls(caller_handle, status);
 `;
 
 let schemaInitPromise: Promise<void> | null = null;

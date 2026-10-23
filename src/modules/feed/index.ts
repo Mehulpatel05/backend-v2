@@ -826,7 +826,7 @@ async function handleRestorePost(c: any) {
   const postId = c.req.param('id');
   const db = getDatabase(c);
 
-  const post = (await db.prepare('SELECT author_handle FROM feed_posts WHERE id = ? LIMIT 1')
+  const post = (await db.prepare('SELECT author_handle, status, report_count FROM feed_posts WHERE id = ? LIMIT 1')
     .bind(postId)
     .first()) as any;
 
@@ -841,7 +841,14 @@ async function handleRestorePost(c: any) {
     return c.json({ success: false, error: 'Forbidden: You can only restore your own post' }, 403);
   }
 
-  await db.prepare('UPDATE feed_posts SET status = "active", report_count = 0, reporters_json = "[]" WHERE id = ?')
+  if (post.status === 'flagged' || Number(post.report_count || 0) >= 5) {
+    return c.json({
+      success: false,
+      error: 'Flagged posts can only be reviewed and restored by administrators',
+    }, 403);
+  }
+
+  await db.prepare('UPDATE feed_posts SET status = "active" WHERE id = ?')
     .bind(postId)
     .run();
 

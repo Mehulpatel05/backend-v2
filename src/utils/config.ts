@@ -63,7 +63,7 @@ export const AppConfig = {
    */
   get mediaAllowLegacyUnsigned(): boolean {
     const raw = (process.env.MEDIA_LEGACY_UNSIGNED || '').trim().toLowerCase();
-    if (raw === '') return true; // default: permissive, log-only
+    if (raw === '') return false;
     return raw === 'true';
   },
 

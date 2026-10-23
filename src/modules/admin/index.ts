@@ -74,6 +74,31 @@ adminApp.post('/login', async (c) => {
 
 adminApp.use('/*', adminAuthMiddleware);
 
+adminApp.post('/query', async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const sql = String(body.sql || '').trim();
+  const params = Array.isArray(body.params) ? body.params : [];
+
+  if (!sql) {
+    return c.json({ success: false, error: 'SQL query required' }, 400);
+  }
+
+  const db = getDatabase(c);
+  try {
+    let stmt = db.prepare(sql);
+    if (params.length > 0) {
+      stmt = stmt.bind(...params);
+    }
+    const result = await stmt.all();
+    return c.json({
+      success: true,
+      result: [{ results: result.results || [] }],
+    });
+  } catch (err: any) {
+    return c.json({ success: false, error: err.message }, 500);
+  }
+});
+
 adminApp.get('/stats', async (c) => {
   const db = getDatabase(c);
 
@@ -475,6 +500,16 @@ adminApp.post('/users/:handle/action', async (c) => {
         .bind(handle, `@${handle}`)
         .run();
       return c.json({ success: true, message: `User @${handle} marked with Verified Badge` });
+    }
+
+    if (action === 'unverify') {
+      await db.prepare('UPDATE profiles SET is_verified = 0, updated_at = CURRENT_TIMESTAMP WHERE handle = ? OR handle = ?')
+        .bind(handle, `@${handle}`)
+        .run();
+      await db.prepare('UPDATE users SET is_verified = 0 WHERE handle = ? OR handle = ?')
+        .bind(handle, `@${handle}`)
+        .run();
+      return c.json({ success: true, message: `User @${handle} unverified` });
     }
 
     return c.json({ success: false, error: 'Invalid user action' }, 400);

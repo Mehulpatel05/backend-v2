@@ -14,6 +14,7 @@ import { actionsApp } from './modules/actions';
 import { presenceApp } from './modules/presence';
 import { preferencesApp } from './modules/preferences';
 import { feedbackApp } from './modules/feedback';
+import { callsApp } from './modules/calls';
 import { adminApp } from './modules/admin';
 import { rewardsApp } from './modules/rewards';
 import { foundingApp, adminFoundingApp } from './modules/founding';
@@ -148,6 +149,9 @@ app.route('/preferences', preferencesApp);
 
 app.route('/api/v2/feedback', feedbackApp);
 app.route('/feedback', feedbackApp);
+
+app.route('/api/v2/calls', callsApp);
+app.route('/calls', callsApp);
 
 app.route('/api/v2/admin', adminApp);
 app.route('/admin', adminApp);
