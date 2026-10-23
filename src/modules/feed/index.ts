@@ -32,10 +32,13 @@ function formatPostRow(row: any, userVote: number = 0) {
   const cleanAuthor = (row.author_handle || '').replace(/^@+/, '').trim();
   const isFounder = row.founder_seq != null && row.founder_seq > 0;
   const isVerifiedCitizen = row.is_verified === 1 || (row.bio && row.bio.includes('[Verified]'));
-  const isVerified = isFounder || isVerifiedCitizen;
-  const authorBadge = isFounder
-    ? `FOUNDING #${row.founder_seq}`
-    : (isVerifiedCitizen ? 'VERIFIED' : (row.author_badge || null));
+  const isOfficial = cleanAuthor.toLowerCase() === 'nearhood_team' || row.post_type === 'official';
+  const isVerified = isFounder || isVerifiedCitizen || isOfficial;
+  const authorBadge = isOfficial
+    ? 'OFFICIAL'
+    : (isFounder
+        ? `FOUNDING #${row.founder_seq}`
+        : (isVerifiedCitizen ? 'VERIFIED' : (row.author_badge || null)));
 
   return {
     id: row.id,
@@ -96,6 +99,10 @@ function formatPostRow(row: any, userVote: number = 0) {
     authorBadge,
     author_badge: authorBadge,
     founderSeq: row.founder_seq ?? null,
+    postType: row.post_type || 'community',
+    post_type: row.post_type || 'community',
+    isPinned: row.is_pinned === 1,
+    is_pinned: row.is_pinned === 1,
   };
 }
 
@@ -151,7 +158,7 @@ async function handleGetPosts(c: any) {
     params.push(cursor);
   }
 
-  query += ' ORDER BY p.created_at DESC LIMIT ?';
+  query += ' ORDER BY COALESCE(p.is_pinned, 0) DESC, p.created_at DESC LIMIT ?';
   params.push(limit);
 
   if (!cursor && offset > 0) {

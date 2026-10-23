@@ -19,6 +19,8 @@ import { rewardsApp } from './modules/rewards';
 import { foundingApp, adminFoundingApp } from './modules/founding';
 import { accountDeletionApp } from './modules/account_deletion';
 import { placesApp, handleWaitlist } from './modules/places';
+import { civicPlacesApp } from './modules/places/civic';
+import { searchApp } from './modules/search';
 import { authMiddleware } from './middleware/auth';
 import { getDatabase } from './db/db_context';
 
@@ -157,6 +159,12 @@ app.route('/api/v2/founding', foundingApp);
 app.route('/founding', foundingApp);
 app.route('/api/v2/admin/founding', adminFoundingApp);
 app.route('/admin/founding', adminFoundingApp);
+
+app.route('/api/v2/places/civic', civicPlacesApp);
+app.route('/places/civic', civicPlacesApp);
+
+app.route('/api/v2/search', searchApp);
+app.route('/search', searchApp);
 
 app.route('/api/v2/places', placesApp);
 app.route('/places', placesApp);

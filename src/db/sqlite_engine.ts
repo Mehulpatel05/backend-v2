@@ -613,6 +613,52 @@ CREATE TABLE IF NOT EXISTS shop_deletion_requests (
 
 CREATE INDEX IF NOT EXISTS idx_shop_deletion_owner ON shop_deletion_requests(owner_handle, status);
 CREATE INDEX IF NOT EXISTS idx_shop_deletion_status ON shop_deletion_requests(status, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS civic_places (
+    id TEXT PRIMARY KEY,
+    city_id TEXT NOT NULL DEFAULT 'GJ-VAD',
+    area_id TEXT,
+    osm_id TEXT NOT NULL,
+    osm_type TEXT NOT NULL,
+    name TEXT NOT NULL,
+    category TEXT NOT NULL,
+    sub_category TEXT DEFAULT '',
+    lat REAL NOT NULL,
+    lng REAL NOT NULL,
+    address TEXT DEFAULT '',
+    pincode TEXT DEFAULT '',
+    opening_hours TEXT DEFAULT '',
+    phone TEXT DEFAULT '',
+    website TEXT DEFAULT '',
+    is_verified INTEGER DEFAULT 0,
+    claimed_by_handle TEXT DEFAULT NULL,
+    source TEXT DEFAULT 'OpenStreetMap',
+    license TEXT DEFAULT 'ODbL',
+    attribution TEXT DEFAULT '© OpenStreetMap contributors',
+    metadata_json TEXT DEFAULT '{}',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(osm_type, osm_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_civic_places_city_cat ON civic_places(city_id, category);
+CREATE INDEX IF NOT EXISTS idx_civic_places_area ON civic_places(city_id, area_id);
+CREATE INDEX IF NOT EXISTS idx_civic_places_coords ON civic_places(lat, lng);
+CREATE INDEX IF NOT EXISTS idx_civic_places_claimed ON civic_places(claimed_by_handle);
+
+CREATE TABLE IF NOT EXISTS place_claim_requests (
+    id TEXT PRIMARY KEY,
+    place_id TEXT NOT NULL,
+    requester_handle TEXT NOT NULL,
+    business_proof_note TEXT NOT NULL,
+    contact_phone TEXT NOT NULL,
+    status TEXT DEFAULT 'pending',
+    admin_notes TEXT DEFAULT '',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_place_claims_status ON place_claim_requests(status, created_at DESC);
 `;
 
 let schemaInitPromise: Promise<void> | null = null;
@@ -759,7 +805,7 @@ export async function ensureSqliteSchema(): Promise<void> {
         'ALTER TABLE user_preferences ADD COLUMN chat_preferences_json TEXT DEFAULT "{}"',
         'ALTER TABLE user_preferences ADD COLUMN keep_chats_archived INTEGER DEFAULT 0',
         'CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)',
-        'INSERT OR IGNORE INTO app_settings (key, value) VALUES ("active_launcher_icon", "default")',
+        'INSERT OR IGNORE INTO app_settings (key, value) VALUES (\'active_launcher_icon\', \'default\')',
         `CREATE TABLE IF NOT EXISTS shop_deletion_requests (
             id TEXT PRIMARY KEY,
             shop_id TEXT NOT NULL,
@@ -774,6 +820,53 @@ export async function ensureSqliteSchema(): Promise<void> {
         )`,
         'CREATE INDEX IF NOT EXISTS idx_shop_deletion_owner ON shop_deletion_requests(owner_handle, status)',
         'CREATE INDEX IF NOT EXISTS idx_shop_deletion_status ON shop_deletion_requests(status, created_at DESC)',
+        `CREATE TABLE IF NOT EXISTS civic_places (
+            id TEXT PRIMARY KEY,
+            city_id TEXT NOT NULL DEFAULT 'GJ-VAD',
+            area_id TEXT,
+            osm_id TEXT NOT NULL,
+            osm_type TEXT NOT NULL,
+            name TEXT NOT NULL,
+            category TEXT NOT NULL,
+            sub_category TEXT DEFAULT '',
+            lat REAL NOT NULL,
+            lng REAL NOT NULL,
+            address TEXT DEFAULT '',
+            pincode TEXT DEFAULT '',
+            opening_hours TEXT DEFAULT '',
+            phone TEXT DEFAULT '',
+            website TEXT DEFAULT '',
+            is_verified INTEGER DEFAULT 0,
+            claimed_by_handle TEXT DEFAULT NULL,
+            source TEXT DEFAULT 'OpenStreetMap',
+            license TEXT DEFAULT 'ODbL',
+            attribution TEXT DEFAULT '© OpenStreetMap contributors',
+            metadata_json TEXT DEFAULT '{}',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(osm_type, osm_id)
+        )`,
+        'CREATE INDEX IF NOT EXISTS idx_civic_places_city_cat ON civic_places(city_id, category)',
+        'CREATE INDEX IF NOT EXISTS idx_civic_places_area ON civic_places(city_id, area_id)',
+        'CREATE INDEX IF NOT EXISTS idx_civic_places_coords ON civic_places(lat, lng)',
+        'CREATE INDEX IF NOT EXISTS idx_civic_places_claimed ON civic_places(claimed_by_handle)',
+        `CREATE TABLE IF NOT EXISTS place_claim_requests (
+            id TEXT PRIMARY KEY,
+            place_id TEXT NOT NULL,
+            requester_handle TEXT NOT NULL,
+            business_proof_note TEXT NOT NULL,
+            contact_phone TEXT NOT NULL,
+            status TEXT DEFAULT 'pending',
+            admin_notes TEXT DEFAULT '',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )`,
+        'CREATE INDEX IF NOT EXISTS idx_place_claims_status ON place_claim_requests(status, created_at DESC)',
+        "ALTER TABLE feed_posts ADD COLUMN post_type TEXT DEFAULT 'community'",
+        'ALTER TABLE feed_posts ADD COLUMN is_pinned INTEGER DEFAULT 0',
+        'CREATE INDEX IF NOT EXISTS idx_feed_city_pinned ON feed_posts(city_id, is_pinned, created_at DESC)',
+        'CREATE VIRTUAL TABLE IF NOT EXISTS civic_places_fts USING fts5(id UNINDEXED, name, category, sub_category, address, content="civic_places", content_rowid="rowid")',
+        'CREATE VIRTUAL TABLE IF NOT EXISTS feed_posts_fts USING fts5(id UNINDEXED, content, category, area_name, content="feed_posts", content_rowid="rowid")',
       ];
 
       for (const m of migrations) {
@@ -806,7 +899,7 @@ export async function ensureSqliteSchema(): Promise<void> {
         if (count === 0 && MASTER_CITIES.length > 0) {
           const defaultCity = MASTER_CITIES[0];
           await client.execute({
-            sql: 'INSERT OR REPLACE INTO cities (id, name, state_id, lat, lng, pincode, is_active, state, country, center_lat, center_lng, radius_km, is_enabled) VALUES (?, ?, ?, ?, ?, ?, 1, ?, "IN", ?, ?, 30, 1)',
+            sql: "INSERT OR REPLACE INTO cities (id, name, state_id, lat, lng, pincode, is_active, state, country, center_lat, center_lng, radius_km, is_enabled) VALUES (?, ?, ?, ?, ?, ?, 1, ?, 'IN', ?, ?, 30, 1)",
             args: [defaultCity.id, defaultCity.name, defaultCity.stateId, defaultCity.lat, defaultCity.lng, defaultCity.pincode, defaultCity.stateId, defaultCity.lat, defaultCity.lng],
           });
           for (let i = 0; i < defaultCity.areas.length; i++) {
@@ -875,7 +968,7 @@ export class SqliteD1Adapter {
   prepare(sql: string) {
     const executeStatement = async (params: any[]) => {
       const { accountId, apiToken, dbId } = getD1Credentials();
-      const d1Configured = Boolean(apiToken && accountId && dbId);
+      const d1Configured = Boolean(apiToken && accountId && dbId) && process.env.USE_LOCAL_SQLITE !== 'true';
 
       // 1. Remote Cloudflare D1 (authoritative when configured)
       if (d1Configured) {
