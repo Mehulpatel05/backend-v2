@@ -14,7 +14,14 @@ import {
 
 const feedApp = new Hono<{ Bindings: Env; Variables: Variables }>();
 
-function formatPostRow(row: any, userVote: number = 0) {
+function calculateHaversineDistanceKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const p = 0.017453292519943295;
+  const c = Math.cos;
+  const a = 0.5 - c((lat2 - lat1) * p) / 2 + c(lat1 * p) * c(lat2 * p) * (1 - c((lon2 - lon1) * p)) / 2;
+  return 12742 * Math.asin(Math.sqrt(a));
+}
+
+function formatPostRow(row: any, userVote: number = 0, userLat?: number | null, userLng?: number | null) {
   let mediaUrls: string[] = [];
   try {
     mediaUrls = JSON.parse(row.media_urls_json || '[]');
@@ -27,6 +34,11 @@ function formatPostRow(row: any, userVote: number = 0) {
     reporters = JSON.parse(row.reporters_json || '[]');
   } catch (_) {
     reporters = [];
+  }
+
+  let distanceKm: number | null = null;
+  if (userLat != null && userLng != null && row.lat != null && row.lng != null) {
+    distanceKm = Math.round(calculateHaversineDistanceKm(userLat, userLng, Number(row.lat), Number(row.lng)) * 10) / 10;
   }
 
   const cleanAuthor = (row.author_handle || '').replace(/^@+/, '').trim();
@@ -66,8 +78,10 @@ function formatPostRow(row: any, userVote: number = 0) {
     area_id: row.area_id || '',
     areaName: row.area_name || '',
     area_name: row.area_name || '',
-    lat: row.lat,
-    lng: row.lng,
+    lat: row.lat != null ? Number(row.lat) : null,
+    lng: row.lng != null ? Number(row.lng) : null,
+    distanceKm: distanceKm ?? row.distance_km ?? null,
+    distance_km: distanceKm ?? row.distance_km ?? null,
     // Category specific attributes
     roomTitle: row.room_title || null,
     roomArea: row.room_area || null,
@@ -118,6 +132,10 @@ async function handleGetPosts(c: any) {
   const author = c.req.query('author');
   const cursor = c.req.query('cursor');
   const includeTest = c.req.query('includeTest') === 'true';
+  const rawUserLat = c.req.query('lat');
+  const rawUserLng = c.req.query('lng');
+  const userLat = rawUserLat ? parseFloat(rawUserLat) : null;
+  const userLng = rawUserLng ? parseFloat(rawUserLng) : null;
 
   let query = `
     SELECT p.*, pr.display_name, pr.avatar_r2_path, pr.is_verified, pr.bio, af.seq AS founder_seq,
@@ -128,7 +146,7 @@ async function handleGetPosts(c: any) {
     WHERE (p.status = 'active' OR p.status IS NULL OR p.status = '')
   `;
   if (!includeTest) {
-    query += " AND LOWER(p.content) NOT IN ('test', 'testing', 'asdf', 'test post', 'kya') AND LOWER(p.content) NOT LIKE '[test]%' AND LOWER(p.content) NOT LIKE '%game screenshot%'";
+    query += " AND LOWER(p.content) NOT IN ('test', 'testing', 'asdf', 'test post', 'kya') AND LOWER(p.content) NOT LIKE '[test]%' AND LOWER(p.content) NOT LIKE '%game screenshot%' AND p.id NOT LIKE 'post_official_%' AND LOWER(p.author_handle) NOT IN ('nearhood_team')";
   }
   const params: any[] = [];
 
@@ -158,7 +176,7 @@ async function handleGetPosts(c: any) {
     params.push(cursor);
   }
 
-  query += ' ORDER BY COALESCE(p.is_pinned, 0) DESC, p.created_at DESC LIMIT ?';
+  query += ' ORDER BY p.created_at DESC LIMIT ?';
   params.push(limit);
 
   if (!cursor && offset > 0) {
@@ -169,7 +187,7 @@ async function handleGetPosts(c: any) {
   const db = getDatabase(c);
   const { results } = await db.prepare(query).bind(...params).all();
 
-  const formatted = (results || []).map((row: any) => formatPostRow(row));
+  const formatted = (results || []).map((row: any) => formatPostRow(row, 0, userLat, userLng));
 
   const nextCursor = formatted.length >= limit ? formatted[formatted.length - 1].createdAt : null;
 
