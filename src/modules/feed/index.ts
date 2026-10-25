@@ -41,16 +41,27 @@ function formatPostRow(row: any, userVote: number = 0, userLat?: number | null, 
     distanceKm = Math.round(calculateHaversineDistanceKm(userLat, userLng, Number(row.lat), Number(row.lng)) * 10) / 10;
   }
 
-  const cleanAuthor = (row.author_handle || '').replace(/^@+/, '').trim();
-  const isFounder = row.founder_seq != null && row.founder_seq > 0;
-  const isVerifiedCitizen = row.is_verified === 1 || (row.bio && row.bio.includes('[Verified]'));
-  const isOfficial = cleanAuthor.toLowerCase() === 'nearhood_team' || row.post_type === 'official';
+  let extra: any = {};
+  try {
+    if (row.extra_json) {
+      extra = typeof row.extra_json === 'string' ? JSON.parse(row.extra_json) : row.extra_json;
+    }
+  } catch (_) {}
+  const isAnonymous = row.is_anonymous === 1 || extra.isAnonymous === true || extra.is_anonymous === true;
+
+  const cleanAuthor = isAnonymous ? 'anonymous' : (row.author_handle || '').replace(/^@+/, '').trim();
+  const isFounder = !isAnonymous && row.founder_seq != null && row.founder_seq > 0;
+  const isVerifiedCitizen = !isAnonymous && (row.is_verified === 1 || (row.bio && row.bio.includes('[Verified]')));
+  const isOfficial = !isAnonymous && (cleanAuthor.toLowerCase() === 'nearhood_team' || row.post_type === 'official');
   const isVerified = isFounder || isVerifiedCitizen || isOfficial;
   const authorBadge = isOfficial
     ? 'OFFICIAL'
     : (isFounder
         ? `FOUNDING #${row.founder_seq}`
         : (isVerifiedCitizen ? 'VERIFIED' : (row.author_badge || null)));
+  const displayAuthorName = isAnonymous
+    ? (row.area_name ? `${row.area_name} Resident` : 'Nearby Resident')
+    : (row.display_name || cleanAuthor);
 
   return {
     id: row.id,
@@ -104,10 +115,12 @@ function formatPostRow(row: any, userVote: number = 0, userLat?: number | null, 
     serviceCategoryText: row.service_category_text || null,
     servicePrice: row.service_price || null,
     audioUrl: row.audio_url || '',
-    displayName: row.display_name || row.author_handle,
-    authorName: row.display_name || row.author_handle,
-    author_name: row.display_name || row.author_handle,
-    avatarUrl: row.avatar_r2_path || null,
+    displayName: displayAuthorName,
+    authorName: displayAuthorName,
+    author_name: displayAuthorName,
+    avatarUrl: isAnonymous ? null : (row.avatar_r2_path || null),
+    isAnonymous,
+    is_anonymous: isAnonymous ? 1 : 0,
     isVerified,
     is_verified: isVerified ? 1 : 0,
     authorBadge,
@@ -272,6 +285,13 @@ async function handleCreatePost(c: any) {
     return c.json({ success: false, error: 'Please keep it respectful.' }, 400);
   }
 
+  const isAnonymous = body.isAnonymous === true || body.is_anonymous === true || body.isAnonymous === 'true';
+  const extraObj: any = {};
+  if (isAnonymous) {
+    extraObj.isAnonymous = true;
+  }
+  const extraJson = JSON.stringify(extraObj);
+
   const postId = `post_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`;
   const mediaJson = JSON.stringify(mediaUrls.length > 0 ? mediaUrls : (imageUrl ? [imageUrl] : []));
 
@@ -285,7 +305,7 @@ async function handleCreatePost(c: any) {
       event_title, event_date, event_location_text, event_price,
       job_title, job_company, job_location, job_type,
       service_title, service_category_text, service_price,
-      audio_url
+      audio_url, extra_json
     ) VALUES (
       ?, ?, ?, ?, ?, ?,
       ?, ?, ?, ?, ?,
@@ -295,7 +315,7 @@ async function handleCreatePost(c: any) {
       ?, ?, ?, ?,
       ?, ?, ?, ?,
       ?, ?, ?,
-      ?
+      ?, ?
     )`
   )
     .bind(
@@ -330,7 +350,8 @@ async function handleCreatePost(c: any) {
       body.serviceTitle || '',
       body.serviceCategoryText || '',
       body.servicePrice || '',
-      audioUrl
+      audioUrl,
+      extraJson
     )
     .run();
 
