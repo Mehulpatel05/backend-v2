@@ -202,6 +202,21 @@ async function handleGetPosts(c: any) {
 feedApp.get('/', handleGetPosts);
 feedApp.get('/posts', handleGetPosts);
 
+async function isGuardianOrAdmin(db: any, rawHandle?: string | null): Promise<boolean> {
+  if (!rawHandle) return false;
+  const clean = rawHandle.replace(/^@+/, '').trim().toLowerCase();
+  if (['admin', 'super_admin', 'nearhood_team', 'admin_vadodara'].includes(clean)) return true;
+  try {
+    const user = (await db.prepare('SELECT is_guardian FROM users WHERE LOWER(handle) = LOWER(?) LIMIT 1').bind(clean).first()) as any;
+    if (user?.is_guardian === 1) return true;
+    const profile = (await db.prepare('SELECT is_guardian FROM profiles WHERE LOWER(handle) = LOWER(?) LIMIT 1').bind(clean).first()) as any;
+    if (profile?.is_guardian === 1) return true;
+    const founder = (await db.prepare('SELECT seq FROM area_founders WHERE LOWER(user_id) = LOWER(?) LIMIT 1').bind(clean).first()) as any;
+    if (founder?.seq && Number(founder.seq) > 0) return true;
+  } catch (_) {}
+  return false;
+}
+
 // Handler for creating posts
 async function handleCreatePost(c: any) {
   const user = c.get('user');
@@ -212,22 +227,40 @@ async function handleCreatePost(c: any) {
     return c.json({ success: false, error: 'Unauthorized user session' }, 401);
   }
 
+  const cleanHandle = (authorHandle || user?.userHandle || '').replace(/^@+/, '').trim();
+  const db = getDatabase(c);
+
+  const banned = (await db.prepare('SELECT handle, reason FROM banned_users WHERE LOWER(handle) = LOWER(?) LIMIT 1').bind(cleanHandle).first()) as any;
+  if (banned) {
+    return c.json({ success: false, error: 'Your account is restricted from posting due to community policy violations.' }, 403);
+  }
+
+  const lastPost = (await db.prepare('SELECT created_at FROM feed_posts WHERE author_handle = ? OR author_handle = ? ORDER BY created_at DESC LIMIT 1').bind(cleanHandle, `@${cleanHandle}`).first()) as any;
+  if (lastPost && lastPost.created_at) {
+    const lastTime = new Date(lastPost.created_at).getTime();
+    const diffSeconds = (Date.now() - lastTime) / 1000;
+    if (!isNaN(diffSeconds) && diffSeconds < 15 && diffSeconds >= 0) {
+      return c.json({
+        success: false,
+        error: `Please wait ${Math.ceil(15 - diffSeconds)}s before creating another post`,
+        retryAfter: Math.ceil(15 - diffSeconds),
+      }, 429);
+    }
+  }
+
   const content = (body.content || '').trim();
   const category = body.category || 'general';
   const imageUrl = body.imageUrl || body.image_url || '';
   const mediaUrls = Array.isArray(body.mediaUrls) ? body.mediaUrls : body.media_urls || [];
+  const audioUrl = body.audioUrl || body.audio_url || '';
   const cityId = body.cityId || body.city_id || '';
   const areaId = body.areaId || body.area_id || '';
   const areaName = body.areaName || body.area_name || '';
   const lat = (body.lat !== undefined && body.lat !== null && body.lat !== '') ? Number(body.lat) : null;
   const lng = (body.lng !== undefined && body.lng !== null && body.lng !== '') ? Number(body.lng) : null;
 
-  if (!content && mediaUrls.length === 0 && !imageUrl) {
-    return c.json({ success: false, error: 'Post must contain text or media' }, 400);
-  }
-
-  if (content && content.length < 15 && mediaUrls.length === 0 && !imageUrl) {
-    return c.json({ success: false, error: 'Post content is too short. Please write at least 15 characters.' }, 400);
+  if (!content && mediaUrls.length === 0 && !imageUrl && !audioUrl) {
+    return c.json({ success: false, error: 'Post must contain text, media, or audio' }, 400);
   }
 
   if (content.length > 5000) {
@@ -241,9 +274,6 @@ async function handleCreatePost(c: any) {
 
   const postId = `post_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`;
   const mediaJson = JSON.stringify(mediaUrls.length > 0 ? mediaUrls : (imageUrl ? [imageUrl] : []));
-  const cleanHandle = (authorHandle || user.userHandle || '').replace(/^@+/, '').trim();
-
-  const db = getDatabase(c);
 
   await db.prepare(
     `INSERT INTO feed_posts (
@@ -254,7 +284,8 @@ async function handleCreatePost(c: any) {
       food_title, food_rating, food_price,
       event_title, event_date, event_location_text, event_price,
       job_title, job_company, job_location, job_type,
-      service_title, service_category_text, service_price
+      service_title, service_category_text, service_price,
+      audio_url
     ) VALUES (
       ?, ?, ?, ?, ?, ?,
       ?, ?, ?, ?, ?,
@@ -263,7 +294,8 @@ async function handleCreatePost(c: any) {
       ?, ?, ?,
       ?, ?, ?, ?,
       ?, ?, ?, ?,
-      ?, ?, ?
+      ?, ?, ?,
+      ?
     )`
   )
     .bind(
@@ -297,7 +329,8 @@ async function handleCreatePost(c: any) {
       body.jobType || '',
       body.serviceTitle || '',
       body.serviceCategoryText || '',
-      body.servicePrice || ''
+      body.servicePrice || '',
+      audioUrl
     )
     .run();
 
@@ -398,6 +431,7 @@ async function handleCreatePost(c: any) {
       category,
       imageUrl,
       mediaUrls,
+      audioUrl,
       cityId,
       areaId,
     },
@@ -784,7 +818,6 @@ feedApp.post('/posts/:id/comments', authMiddleware, handleAddComment);
 feedApp.post('/:id/comment', authMiddleware, handleAddComment);
 feedApp.post('/posts/:id/comment', authMiddleware, handleAddComment);
 
-// 6. Report Post
 async function handleReportPost(c: any) {
   const user = c.get('user');
   const postId = c.req.param('id');
@@ -818,11 +851,13 @@ async function handleReportPost(c: any) {
 
     reporters.push(cleanUser);
     const newReportCount = (post.report_count || 0) + 1;
-    const newStatus = newReportCount >= 5 ? 'flagged' : (post.status || 'active');
+    const newStatus = newReportCount >= 3 ? 'flagged' : (post.status || 'active');
 
-    await db.prepare('UPDATE feed_posts SET report_count = ?, reporters_json = ?, status = ? WHERE id = ?')
-      .bind(newReportCount, JSON.stringify(reporters), newStatus, postId)
-      .run();
+    const reportId = `rep_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`;
+    await db.batch([
+      db.prepare('INSERT INTO post_reports (id, post_id, reporter_handle, reason) VALUES (?, ?, ?, ?)').bind(reportId, postId, cleanUser, reason),
+      db.prepare('UPDATE feed_posts SET report_count = ?, reporters_json = ?, status = ? WHERE id = ?').bind(newReportCount, JSON.stringify(reporters), newStatus, postId),
+    ]);
 
     return c.json({
       success: true,
@@ -838,10 +873,9 @@ async function handleReportPost(c: any) {
 feedApp.post('/:id/report', authMiddleware, handleReportPost);
 feedApp.post('/posts/:id/report', authMiddleware, handleReportPost);
 
-// 7. Restore Post
 async function handleRestorePost(c: any) {
   const user = c.get('user');
-  const postId = c.req.param('id');
+  const postId = c.req.param('id') || c.req.param('postId');
   const db = getDatabase(c);
 
   const post = (await db.prepare('SELECT author_handle, status, report_count FROM feed_posts WHERE id = ? LIMIT 1')
@@ -854,30 +888,99 @@ async function handleRestorePost(c: any) {
 
   const cleanAuthor = (post.author_handle || '').replace(/^@+/, '').trim().toLowerCase();
   const cleanUser = (user.userHandle || '').replace(/^@+/, '').trim().toLowerCase();
+  const isGuardian = await isGuardianOrAdmin(db, cleanUser);
 
-  if (cleanUser !== cleanAuthor) {
-    return c.json({ success: false, error: 'Forbidden: You can only restore your own post' }, 403);
+  if (!isGuardian && cleanUser !== cleanAuthor) {
+    return c.json({ success: false, error: 'Forbidden: Insufficient permissions to restore this post' }, 403);
   }
 
-  if (post.status === 'flagged' || Number(post.report_count || 0) >= 5) {
-    return c.json({
-      success: false,
-      error: 'Flagged posts can only be reviewed and restored by administrators',
-    }, 403);
-  }
-
-  await db.prepare('UPDATE feed_posts SET status = "active" WHERE id = ?')
-    .bind(postId)
-    .run();
+  await db.batch([
+    db.prepare('UPDATE feed_posts SET status = "active", report_count = 0, reporters_json = "[]" WHERE id = ?').bind(postId),
+    db.prepare('DELETE FROM post_reports WHERE post_id = ?').bind(postId),
+  ]);
 
   return c.json({
     success: true,
-    message: 'Post restored successfully',
+    message: 'Post restored successfully and made live on feed',
   });
 }
 
 feedApp.post('/:id/restore', authMiddleware, handleRestorePost);
 feedApp.post('/posts/:id/restore', authMiddleware, handleRestorePost);
+feedApp.post('/admin/restore', authMiddleware, handleRestorePost);
+feedApp.post('/posts/admin/restore', authMiddleware, handleRestorePost);
+
+async function handleGetReportedPosts(c: any) {
+  const user = c.get('user');
+  const cleanUser = (user?.userHandle || '').replace(/^@+/, '').trim().toLowerCase();
+  const db = getDatabase(c);
+
+  const isGuardian = await isGuardianOrAdmin(db, cleanUser);
+  if (!isGuardian) {
+    return c.json({ success: false, error: 'Forbidden: Guardian access required' }, 403);
+  }
+
+  const { results } = await db.prepare(
+    `SELECT p.*, pr.display_name, pr.avatar_r2_path, pr.is_verified,
+     (SELECT GROUP_CONCAT(reason, ', ') FROM post_reports WHERE post_id = p.id) AS report_reasons
+     FROM feed_posts p
+     LEFT JOIN profiles pr ON (LOWER(p.author_handle) = LOWER(pr.handle) OR LOWER(p.author_handle) = '@' || LOWER(pr.handle))
+     WHERE (p.status = 'flagged' OR p.report_count > 0) AND p.status != 'deleted'
+     ORDER BY p.report_count DESC, p.created_at DESC
+     LIMIT 50`
+  ).all();
+
+  const formatted = (results || []).map((row: any) => ({
+    ...formatPostRow(row),
+    reportReasons: row.report_reasons || 'community_flag',
+    report_reasons: row.report_reasons || 'community_flag',
+    reportCount: row.report_count || 0,
+    status: row.status,
+  }));
+
+  return c.json({
+    success: true,
+    posts: formatted,
+    count: formatted.length,
+  });
+}
+
+feedApp.get('/admin/reported', authMiddleware, handleGetReportedPosts);
+feedApp.get('/posts/admin/reported', authMiddleware, handleGetReportedPosts);
+
+async function handleBanAuthor(c: any) {
+  const user = c.get('user');
+  const cleanUser = (user?.userHandle || '').replace(/^@+/, '').trim().toLowerCase();
+  const db = getDatabase(c);
+
+  const isGuardian = await isGuardianOrAdmin(db, cleanUser);
+  if (!isGuardian) {
+    return c.json({ success: false, error: 'Forbidden: Guardian access required' }, 403);
+  }
+
+  const body = await c.req.json().catch(() => ({}));
+  const targetHandle = (body.handle || body.authorHandle || body.author_handle || '').replace(/^@+/, '').trim().toLowerCase();
+  const reason = (body.reason || 'Community safety policy violation').trim();
+
+  if (!targetHandle) {
+    return c.json({ success: false, error: 'Target user handle required' }, 400);
+  }
+
+  await db.batch([
+    db.prepare('INSERT OR REPLACE INTO banned_users (handle, banned_by, reason) VALUES (?, ?, ?)').bind(targetHandle, cleanUser, reason),
+    db.prepare('UPDATE feed_posts SET status = "banned" WHERE LOWER(author_handle) = ? OR LOWER(author_handle) = ?').bind(targetHandle, `@${targetHandle}`),
+  ]);
+
+  return c.json({
+    success: true,
+    message: `@${targetHandle} has been banned and posts hidden`,
+  });
+}
+
+feedApp.post('/admin/ban', authMiddleware, handleBanAuthor);
+feedApp.post('/posts/admin/ban', authMiddleware, handleBanAuthor);
+feedApp.post('/:id/ban-author', authMiddleware, handleBanAuthor);
+feedApp.post('/posts/:id/ban-author', authMiddleware, handleBanAuthor);
 
 // 8. Mark Post / Item as Sold
 async function handleMarkSold(c: any) {
@@ -964,17 +1067,25 @@ async function handleToggleRsvp(c: any) {
 feedApp.post('/:id/rsvp', authMiddleware, handleToggleRsvp);
 feedApp.post('/posts/:id/rsvp', authMiddleware, handleToggleRsvp);
 
-// 11. Delete Post
 async function handleDeletePost(c: any) {
   const user = c.get('user');
   const postId = c.req.param('id');
   const db = getDatabase(c);
 
-  const res = await db.prepare(
-    'DELETE FROM feed_posts WHERE id = ? AND (author_handle = ? OR author_handle = ?)'
-  )
-    .bind(postId, user.userHandle, `@${user.userHandle}`)
-    .run();
+  const cleanUser = (user.userHandle || '').replace(/^@+/, '').trim().toLowerCase();
+  const isGuardian = await isGuardianOrAdmin(db, cleanUser);
+
+  let res: any;
+  if (isGuardian) {
+    res = await db.prepare('DELETE FROM feed_posts WHERE id = ?').bind(postId).run();
+    await db.prepare('DELETE FROM post_reports WHERE post_id = ?').bind(postId).run();
+  } else {
+    res = await db.prepare(
+      'DELETE FROM feed_posts WHERE id = ? AND (author_handle = ? OR author_handle = ?)'
+    )
+      .bind(postId, user.userHandle, `@${user.userHandle}`)
+      .run();
+  }
 
   if (res.meta?.changes === 0) {
     return c.json({ success: false, error: 'Post not found or unauthorized' }, 404);

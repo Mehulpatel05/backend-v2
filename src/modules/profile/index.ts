@@ -222,6 +222,10 @@ profileApp.get('/:handle', async (c) => {
       badge: authorBadge,
       founderSeq: profile.founder_seq ?? null,
       founderAreaId: profile.founder_area_id ?? null,
+      isGuardian: profile.is_guardian === 1,
+      is_guardian: profile.is_guardian === 1,
+      isAge18Plus: profile.is_age_18_plus === 1,
+      is_age_18_plus: profile.is_age_18_plus === 1,
       nameUpdatedAt: profile.name_updated_at ?? null,
       name_updated_at: profile.name_updated_at ?? null,
       handleUpdatedAt: profile.handle_updated_at ?? null,
@@ -458,6 +462,14 @@ profileApp.put('/', authMiddleware, async (c) => {
   if (fcmToken !== undefined) {
     updates.push('fcm_token = ?');
     params.push(fcmToken);
+  }
+  if (body.isAge18Plus !== undefined || body.is_age_18_plus !== undefined) {
+    const isAge = (body.isAge18Plus === true || body.is_age_18_plus === true || body.is_age_18_plus === 1) ? 1 : 0;
+    updates.push('is_age_18_plus = ?');
+    params.push(isAge);
+    try {
+      await db.prepare('UPDATE users SET is_age_18_plus = ? WHERE LOWER(handle) = LOWER(?) OR LOWER(handle) = LOWER(?)').bind(isAge, targetHandle, `@${targetHandle}`).run();
+    } catch (_) {}
   }
   if (nameChanged) {
     updates.push('name_updated_at = CURRENT_TIMESTAMP');

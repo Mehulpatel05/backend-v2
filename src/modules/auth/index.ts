@@ -599,6 +599,16 @@ async function handleClaimHandle(c: any) {
         );
       } catch (_) {}
     }
+
+    if (body.isAge18Plus !== undefined || body.is_age_18_plus !== undefined) {
+      const isAge = (body.isAge18Plus === true || body.is_age_18_plus === true || body.is_age_18_plus === 1) ? 1 : 0;
+      cascadeUpdates.push(
+        db.prepare('UPDATE profiles SET is_age_18_plus = ? WHERE LOWER(handle) = LOWER(?) OR LOWER(handle) = LOWER(?)').bind(isAge, newHandle, currentUserHandle)
+      );
+      cascadeUpdates.push(
+        db.prepare('UPDATE users SET is_age_18_plus = ? WHERE LOWER(handle) = LOWER(?) OR LOWER(handle) = LOWER(?)').bind(isAge, newHandle, currentUserHandle)
+      );
+    }
     await Promise.allSettled(cascadeUpdates.map((s) => s.run()));
 
     const optionalTables = [
