@@ -22,6 +22,7 @@ import { accountDeletionApp } from './modules/account_deletion';
 import { placesApp, handleWaitlist } from './modules/places';
 import { civicPlacesApp } from './modules/places/civic';
 import { searchApp } from './modules/search';
+import { aiApp } from './modules/ai';
 import { authMiddleware } from './middleware/auth';
 import { getDatabase } from './db/db_context';
 
@@ -174,6 +175,9 @@ app.route('/api/v2/places', placesApp);
 app.route('/places', placesApp);
 app.route('/api/v2/areas', placesApp);
 app.route('/areas', placesApp);
+
+app.route('/api/v2/ai', aiApp);
+app.route('/ai', aiApp);
 
 app.post('/api/v2/waitlist', handleWaitlist);
 app.post('/waitlist', handleWaitlist);
