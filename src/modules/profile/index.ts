@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { Env, Variables } from '../../types';
 import { authMiddleware } from '../../middleware/auth';
 import { getDatabase } from '../../db/db_context';
+import { syncUserProfileToD1Folder } from '../../utils/d1_user_sync';
 
 const profileApp = new Hono<{ Bindings: Env; Variables: Variables }>();
 
@@ -514,6 +515,8 @@ profileApp.put('/', authMiddleware, async (c) => {
 
   const nameCooldown = calculateCooldown(updated?.name_updated_at, NAME_COOLDOWN_MS);
   const handleCooldown = calculateCooldown(updated?.handle_updated_at, HANDLE_COOLDOWN_MS);
+
+  syncUserProfileToD1Folder(db, targetHandle, c).catch(() => {});
 
   return c.json({
     success: true,

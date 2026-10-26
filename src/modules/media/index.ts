@@ -114,7 +114,7 @@ mediaApp.post('/upload', authMiddleware, async (c) => {
       r2Path = R2UserStorageHelper.getAudioPath(userHandle, filename);
       break;
     default:
-      r2Path = `${R2UserStorageHelper.getUserRoot(userHandle)}/misc/${Date.now()}_${filename}`;
+      r2Path = R2UserStorageHelper.getMiscPath(userHandle, filename);
   }
 
   const arrayBuffer = await file.arrayBuffer();
@@ -166,7 +166,28 @@ mediaApp.post('/presigned-url', authMiddleware, async (c) => {
   const moduleType = body.moduleType || 'posts';
   const listingId = body.listingId || 'generic';
 
-  const r2Path = R2UserStorageHelper.getFeedPostPath(userHandle, listingId, filename);
+  let r2Path = '';
+  switch (moduleType) {
+    case 'profile':
+      r2Path = R2UserStorageHelper.getProfilePath(userHandle, filename);
+      break;
+    case 'bazar_shop':
+      r2Path = R2UserStorageHelper.getBazarShopPath(userHandle, listingId || 'shop', filename);
+      break;
+    case 'bazar':
+    case 'bazar_listing':
+      r2Path = R2UserStorageHelper.getBazarListingPath(userHandle, listingId || 'listing', filename);
+      break;
+    case 'chat':
+      r2Path = R2UserStorageHelper.getChatMediaPath(userHandle, listingId || 'dm', filename);
+      break;
+    case 'audio':
+      r2Path = R2UserStorageHelper.getAudioPath(userHandle, filename);
+      break;
+    default:
+      r2Path = R2UserStorageHelper.getFeedPostPath(userHandle, listingId || 'post', filename);
+      break;
+  }
   const publicUrl = getProxyUrl(c, r2Path);
 
   try {

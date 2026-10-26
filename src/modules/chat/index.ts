@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { Env, Variables } from '../../types';
 import { authMiddleware } from '../../middleware/auth';
 import { getDatabase } from '../../db/db_context';
+import { syncUserChatsToD1Folder } from '../../utils/d1_user_sync';
 import { sendPushNotification } from '../../services/fcm_service';
 import { isBlockedBetween } from '../../utils/blocks';
 
@@ -402,6 +403,8 @@ async function handleSendMessage(c: any) {
       db,
     }).catch((pushErr) => console.error('[Chat FCM] Push dispatch error:', pushErr));
   } catch (_) {}
+
+  syncUserChatsToD1Folder(db, myHandle, c).catch(() => {});
 
   return c.json({
     success: true,

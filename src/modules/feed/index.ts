@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { Env, Variables } from '../../types';
 import { authMiddleware } from '../../middleware/auth';
 import { getDatabase } from '../../db/db_context';
+import { syncUserFeedPostsToD1Folder } from '../../utils/d1_user_sync';
 import { sendPushNotification } from '../../services/fcm_service';
 import { awardPoints, handleReplyLikeOrVote } from '../rewards';
 import {
@@ -415,6 +416,8 @@ async function handleCreatePost(c: any) {
       }
     } catch (_) {}
   }
+
+  syncUserFeedPostsToD1Folder(db, cleanHandle, c).catch(() => {});
 
   return c.json({
     success: true,

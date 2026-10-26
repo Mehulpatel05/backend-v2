@@ -7,6 +7,7 @@ import { WakitService } from '../../services/wakit_service';
 import { Fast2SmsService } from '../../services/fast2sms_service';
 import { orchestrateAccountDeletion } from '../account_deletion';
 import { findMasterCity, isLiveCity } from '../../data/master_cities';
+import { syncUserProfileToD1Folder, syncAllUserDataToD1Folder } from '../../utils/d1_user_sync';
 
 const authApp = new Hono<{ Bindings: Env; Variables: Variables }>();
 
@@ -402,6 +403,8 @@ async function handleVerifyOtp(c: any) {
 
   const isAreaConfirmed = (userRow?.area_confirmed ?? profileRow?.area_confirmed ?? 1) === 1;
 
+  syncUserProfileToD1Folder(db, handle, c).catch(() => {});
+
   return c.json({
     success: true,
     access_token: sessionToken,
@@ -684,6 +687,8 @@ async function handleClaimHandle(c: any) {
     console.error('[handleClaimHandle] Session rotation failed:', err);
     return c.json({ success: false, error: 'Handle saved but session refresh failed. Please sign in again.' }, 500);
   }
+
+  syncAllUserDataToD1Folder(db, newHandle, c).catch(() => {});
 
   return c.json({
     success: true,

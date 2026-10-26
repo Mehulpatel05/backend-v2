@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { Env, Variables } from '../../types';
 import { authMiddleware } from '../../middleware/auth';
 import { getDatabase } from '../../db/db_context';
+import { syncUserBazarToD1Folder } from '../../utils/d1_user_sync';
 import { awardPoints, checkAndAwardBadges } from '../rewards';
 import { reversePoints } from '../rewards/anti_abuse';
 
@@ -176,6 +177,8 @@ bazarApp.post('/listings', authMiddleware, async (c) => {
   let pointsAwarded = 0;
   let dailyCapReached = false;
   let newBalance: number | undefined;
+
+  syncUserBazarToD1Folder(db, cleanHandle, c).catch(() => {});
 
   return c.json({
     success: true,
@@ -383,6 +386,8 @@ bazarApp.post('/shops', authMiddleware, async (c) => {
       initialStatus
     )
     .run();
+
+  syncUserBazarToD1Folder(db, cleanHandle, c).catch(() => {});
 
   return c.json({
     success: true,

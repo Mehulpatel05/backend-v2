@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { Env, Variables } from '../../types';
 import { authMiddleware } from '../../middleware/auth';
 import { getDatabase } from '../../db/db_context';
+import { syncUserPreferencesToD1Folder } from '../../utils/d1_user_sync';
 
 const preferencesApp = new Hono<{ Bindings: Env; Variables: Variables }>();
 
@@ -217,6 +218,8 @@ preferencesApp.post('/', authMiddleware, async (c) => {
         .bind(targetHandle, callPrivacy, JSON.stringify(pinnedChats), JSON.stringify(mutedChats), theme)
         .run();
     }
+
+    syncUserPreferencesToD1Folder(db, myHandle, c).catch(() => {});
 
     return c.json({
       success: true,
