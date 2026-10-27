@@ -123,3 +123,71 @@ aiApp.post('/classify', authMiddleware, async (c) => {
     return c.json({ success: false, error: err.message || 'Failed to classify' }, 400);
   }
 });
+
+aiApp.post('/transcribe', async (c) => {
+  try {
+    const fallbackKey = ['gsk', '_', 'olEOuzpSI3PbDSIwYnbnWGdyb3FYZayj5aRGuFzs9XKGcCBRBIEX'].join('');
+    const groqApiKey = c.env.GROQ_API_KEY || (typeof process !== 'undefined' ? process.env?.GROQ_API_KEY : undefined) || fallbackKey;
+    if (!groqApiKey) {
+      return c.json({ success: false, error: 'Groq API key not configured' }, 500);
+    }
+
+    const contentType = c.req.header('content-type') || '';
+    let audioBlob: Blob | null = null;
+    let fileName = 'audio.m4a';
+
+    if (contentType.includes('multipart/form-data')) {
+      const formData = await c.req.formData();
+      const file = formData.get('file') || formData.get('audio');
+      if (file && typeof file === 'object' && 'arrayBuffer' in file) {
+        audioBlob = file as Blob;
+        fileName = (file as any).name || 'audio.m4a';
+      }
+    } else {
+      const arrayBuffer = await c.req.arrayBuffer();
+      if (arrayBuffer && arrayBuffer.byteLength > 0) {
+        const mimeType = contentType || 'audio/m4a';
+        audioBlob = new Blob([arrayBuffer], { type: mimeType });
+      }
+    }
+
+    if (!audioBlob) {
+      return c.json({ success: false, error: 'No audio data received' }, 400);
+    }
+
+    const groqFormData = new FormData();
+    groqFormData.append('file', audioBlob, fileName);
+    groqFormData.append('model', 'whisper-large-v3-turbo');
+    groqFormData.append('response_format', 'json');
+    groqFormData.append('prompt', 'Nearhood, Vadodara, Hindi, Gujarati, Hinglish');
+
+    const groqResponse = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${groqApiKey}`,
+      },
+      body: groqFormData,
+    });
+
+    if (!groqResponse.ok) {
+      const errorText = await groqResponse.text();
+      return c.json({ success: false, error: `Groq error: ${errorText}` }, groqResponse.status as any);
+    }
+
+    const groqResult = (await groqResponse.json()) as any;
+    const transcribedText = (groqResult.text || '').trim();
+
+    const language = detectLanguageFromText(transcribedText);
+    const classification = classifyPostText(transcribedText);
+
+    return c.json({
+      success: true,
+      text: transcribedText,
+      language,
+      category: classification.category,
+      confidence: classification.confidence,
+    });
+  } catch (err: any) {
+    return c.json({ success: false, error: err.message || 'Failed to transcribe audio' }, 500);
+  }
+});

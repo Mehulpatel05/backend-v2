@@ -9,6 +9,7 @@ export interface Env {
   OLA_MAPS_CLIENT_SECRET?: string;
   MAPS_PROVIDER?: string;
   GOOGLE_MAPS_API_KEY?: string;
+  GROQ_API_KEY?: string;
 }
 
 export interface UserContext {
