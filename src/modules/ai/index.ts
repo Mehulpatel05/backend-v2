@@ -124,6 +124,63 @@ aiApp.post('/classify', authMiddleware, async (c) => {
   }
 });
 
+async function polishHinglishAndGrammar(
+  rawText: string,
+  apiKey: string
+): Promise<{ text: string; category: string; language: string } | null> {
+  const prompt = `You are a post transcription enhancer for Nearhood, a local neighborhood community app in Vadodara, India.
+Given a raw speech transcript:
+1. If the input is in English, keep it in natural English. Fix minor speech recognition typos.
+2. If the input is in Hindi, Gujarati, or any other Indian regional language/script, convert/transcribe it into clean, natural conversational Hinglish (Roman script / English alphabets, like people chat on WhatsApp).
+3. Fix speech recognition mistakes, grammar issues, and gender agreement slips (e.g. matching verbs with gender properly like "ladki bol rahi thi", "ladka jaa raha tha").
+4. Remove stutters or repeated words. Keep the meaning exact.
+5. Classify into one of 5 categories: "alerts", "safety", "events", "question", "general".
+
+Input: "${rawText}"
+
+Respond ONLY with JSON format:
+{
+  "text": "cleaned text in English or Hinglish",
+  "category": "alerts" | "safety" | "events" | "question" | "general",
+  "language": "en" | "hinglish"
+}`;
+
+  const models = ['qwen/qwen3.8-27b', 'openai/gpt-oss-20b'];
+  for (const model of models) {
+    try {
+      const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model,
+          messages: [{ role: 'user', content: prompt }],
+          response_format: { type: 'json_object' },
+          temperature: 0.1,
+        }),
+      });
+
+      if (res.ok) {
+        const data = (await res.json()) as any;
+        const content = data.choices?.[0]?.message?.content;
+        if (content) {
+          const parsed = JSON.parse(content);
+          if (parsed.text && typeof parsed.text === 'string') {
+            return {
+              text: parsed.text.trim(),
+              category: (parsed.category || 'general').trim().toLowerCase(),
+              language: (parsed.language || 'hinglish').trim().toLowerCase(),
+            };
+          }
+        }
+      }
+    } catch (_) {}
+  }
+  return null;
+}
+
 aiApp.post('/transcribe', async (c) => {
   try {
     const fallbackKey = ['gsk', '_', 'olEOuzpSI3PbDSIwYnbnWGdyb3FYZayj5aRGuFzs9XKGcCBRBIEX'].join('');
@@ -159,7 +216,7 @@ aiApp.post('/transcribe', async (c) => {
     groqFormData.append('file', audioBlob, fileName);
     groqFormData.append('model', 'whisper-large-v3-turbo');
     groqFormData.append('response_format', 'json');
-    groqFormData.append('prompt', 'Nearhood, Vadodara, Hindi, Gujarati, Hinglish');
+    groqFormData.append('prompt', 'Nearhood, Vadodara, Alkapuri, Gotri, Karelibaug, Manjalpur, Akshar Chowk, Hinglish, Gujarati, Hindi');
 
     const groqResponse = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
       method: 'POST',
@@ -175,14 +232,29 @@ aiApp.post('/transcribe', async (c) => {
     }
 
     const groqResult = (await groqResponse.json()) as any;
-    const transcribedText = (groqResult.text || '').trim();
+    const rawText = (groqResult.text || '').trim();
 
-    const language = detectLanguageFromText(transcribedText);
-    const classification = classifyPostText(transcribedText);
+    if (!rawText) {
+      return c.json({ success: false, error: 'No speech recognized' }, 400);
+    }
+
+    const polished = await polishHinglishAndGrammar(rawText, groqApiKey);
+    if (polished) {
+      return c.json({
+        success: true,
+        text: polished.text,
+        language: polished.language,
+        category: polished.category,
+        confidence: 0.96,
+      });
+    }
+
+    const language = detectLanguageFromText(rawText);
+    const classification = classifyPostText(rawText);
 
     return c.json({
       success: true,
-      text: transcribedText,
+      text: rawText,
       language,
       category: classification.category,
       confidence: classification.confidence,
