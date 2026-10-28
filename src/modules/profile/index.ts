@@ -203,6 +203,8 @@ profileApp.get('/:handle', async (c) => {
   const nameCooldown = calculateCooldown(profile.name_updated_at, NAME_COOLDOWN_MS);
   const handleCooldown = calculateCooldown(profile.handle_updated_at, HANDLE_COOLDOWN_MS);
 
+  const showProfilePhoto = profile.show_profile_photo !== 0;
+
   return c.json({
     success: true,
     profile: {
@@ -210,12 +212,14 @@ profileApp.get('/:handle', async (c) => {
       displayName: profile.display_name || profile.handle.replace(/^@+/, '').trim(),
       display_name: profile.display_name || profile.handle.replace(/^@+/, '').trim(),
       bio: profile.bio || '',
-      avatar_r2_path: profile.avatar_r2_path || '',
+      avatar_r2_path: showProfilePhoto ? (profile.avatar_r2_path || '') : '',
       banner_r2_path: profile.banner_r2_path || '',
       friend_count: profile.friend_count || 0,
       friendCount: profile.friend_count || 0,
-      photoUrl: profile.avatar_r2_path || null,
-      avatarUrl: profile.avatar_r2_path || null,
+      photoUrl: showProfilePhoto ? (profile.avatar_r2_path || null) : null,
+      avatarUrl: showProfilePhoto ? (profile.avatar_r2_path || null) : null,
+      showProfilePhoto,
+      show_profile_photo: showProfilePhoto ? 1 : 0,
       isVerified,
       is_verified: isVerified ? 1 : 0,
       authorBadge,
@@ -472,6 +476,11 @@ profileApp.put('/', authMiddleware, async (c) => {
       await db.prepare('UPDATE users SET is_age_18_plus = ? WHERE LOWER(handle) = LOWER(?) OR LOWER(handle) = LOWER(?)').bind(isAge, targetHandle, `@${targetHandle}`).run();
     } catch (_) {}
   }
+  if (body.showProfilePhoto !== undefined || body.show_profile_photo !== undefined) {
+    const showPhoto = (body.showProfilePhoto === false || body.show_profile_photo === 0 || body.show_profile_photo === false) ? 0 : 1;
+    updates.push('show_profile_photo = ?');
+    params.push(showPhoto);
+  }
   if (nameChanged) {
     updates.push('name_updated_at = CURRENT_TIMESTAMP');
   }
@@ -494,6 +503,9 @@ profileApp.put('/', authMiddleware, async (c) => {
       } catch (_) {}
       try {
         await db.prepare('ALTER TABLE profiles ADD COLUMN handle_updated_at TIMESTAMP NULL').run();
+      } catch (_) {}
+      try {
+        await db.prepare('ALTER TABLE profiles ADD COLUMN show_profile_photo INTEGER DEFAULT 1').run();
       } catch (_) {}
       await db.prepare(query).bind(...params).run();
     }

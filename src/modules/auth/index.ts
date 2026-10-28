@@ -1029,6 +1029,7 @@ authApp.get('/profile/:handle', async (c) => {
   }
 
   const isVerified = (profile?.is_verified === 1) || (u?.is_verified === 1) || (profile?.bio && profile.bio.includes('[Verified]')) ? 1 : 0;
+  const showProfilePhoto = profile?.show_profile_photo !== 0;
 
   return c.json({
     success: true,
@@ -1037,26 +1038,28 @@ authApp.get('/profile/:handle', async (c) => {
       handle: handle,
       name: profile?.display_name || handle,
       displayName: profile?.display_name || handle,
-      avatarUrl: profile?.avatar_r2_path || '',
-      photoUrl: profile?.avatar_r2_path || '',
+      avatarUrl: showProfilePhoto ? (profile?.avatar_r2_path || '') : '',
+      photoUrl: showProfilePhoto ? (profile?.avatar_r2_path || '') : '',
+      showProfilePhoto,
+      show_profile_photo: showProfilePhoto ? 1 : 0,
       bio: profile?.bio || '',
       isVerified: isVerified === 1,
       is_verified: isVerified,
       friendCount: profile?.friend_count || 0,
     },
     profile: profile ? {
-      // Explicit allowlist — spreading the raw row leaked private columns
-      // (notably fcm_token) from this unauthenticated endpoint.
       handle: handle,
       display_name: profile.display_name || handle,
       displayName: profile.display_name || handle,
       bio: profile.bio || '',
-      avatar_r2_path: profile.avatar_r2_path || '',
+      avatar_r2_path: showProfilePhoto ? (profile.avatar_r2_path || '') : '',
+      photoUrl: showProfilePhoto ? (profile.avatar_r2_path || '') : '',
+      avatarUrl: showProfilePhoto ? (profile.avatar_r2_path || '') : '',
+      showProfilePhoto,
+      show_profile_photo: showProfilePhoto ? 1 : 0,
       banner_r2_path: profile.banner_r2_path || '',
       friend_count: profile.friend_count || 0,
       created_at: profile.created_at,
-      photoUrl: profile.avatar_r2_path || '',
-      avatarUrl: profile.avatar_r2_path || '',
       isVerified: isVerified === 1,
       is_verified: isVerified,
     } : null,
