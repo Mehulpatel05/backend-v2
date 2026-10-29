@@ -2,10 +2,32 @@ import { Hono } from 'hono';
 import { Env, Variables } from '../../types';
 import { getDatabase } from '../../db/db_context';
 import { sendPushNotification } from '../../services/fcm_service';
+import { authMiddleware } from '../../middleware/auth';
 
 export const callsApp = new Hono<{ Bindings: Env; Variables: Variables }>();
 
+callsApp.use('*', authMiddleware);
+
+function getVerifiedHandle(c: any): string {
+  const verifiedUser = c.get('user');
+  return (verifiedUser?.userHandle || verifiedUser?.handle || '').replace(/^@+/, '').trim().toLowerCase();
+}
+
+function ensureUtcIso(val: any): string {
+  if (!val) return new Date().toISOString();
+  let s = String(val).trim();
+  if (!s.endsWith('Z') && !s.includes('+') && !/-\d\d:\d\d$/.test(s)) {
+    s = s.replace(' ', 'T') + 'Z';
+  }
+  return s;
+}
+
 callsApp.post('/initiate', async (c) => {
+  const verifiedHandle = getVerifiedHandle(c);
+  if (!verifiedHandle) {
+    return c.json({ success: false, error: 'Unauthorized caller identity' }, 401);
+  }
+
   const body = await c.req.json().catch(() => ({}));
   const caller = (body.caller || body.callerHandle || '').replace(/^@+/, '').trim();
   const receiver = (body.receiver || body.receiverHandle || '').replace(/^@+/, '').trim();
@@ -14,6 +36,10 @@ callsApp.post('/initiate', async (c) => {
 
   if (!caller || !receiver || !sdpOffer) {
     return c.json({ success: false, error: 'Missing required parameters' }, 400);
+  }
+
+  if (caller.toLowerCase() !== verifiedHandle) {
+    return c.json({ success: false, error: 'Unauthorized caller identity' }, 403);
   }
 
   const db = getDatabase(c);
@@ -57,24 +83,28 @@ callsApp.post('/initiate', async (c) => {
       }
     }
 
-    const id = `call_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`;
+    const rawCallId = (body.callId || body.id || '').toString().trim();
+    const id = rawCallId && rawCallId.startsWith('call_')
+      ? rawCallId
+      : `call_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`;
 
     await db.prepare(
-      'INSERT INTO calls (id, caller_handle, receiver_handle, call_type, status, sdp_offer, sdp_answer, caller_candidates_json, receiver_candidates_json, duration_seconds, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP)'
+      'INSERT INTO calls (id, caller_handle, receiver_handle, call_type, status, sdp_offer, created_at) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)'
     )
-      .bind(id, caller, receiver, callType, 'calling', sdpOffer, '', '[]', '[]')
+      .bind(id, caller, receiver, callType, 'calling', sdpOffer)
       .run();
 
     sendPushNotification({
       targetHandle: receiver,
-      title: `${caller} is calling...`,
-      body: 'Incoming Voice Call 📞',
+      title: 'Incoming Audio Call',
+      body: `@${caller} is calling you...`,
       channelId: 'nearhood_calls',
       data: {
-        type: 'call',
+        type: 'call_incoming',
         callId: id,
-        callType,
         callerHandle: caller,
+        receiverHandle: receiver,
+        callType: callType,
       },
       db,
     }).catch(() => {});
@@ -86,9 +116,16 @@ callsApp.post('/initiate', async (c) => {
 });
 
 callsApp.get('/active', async (c) => {
+  const verifiedHandle = getVerifiedHandle(c);
+  if (!verifiedHandle) {
+    return c.json({ success: false, error: 'Unauthorized handle access' }, 401);
+  }
+
   const handle = (c.req.query('handle') || '').replace(/^@+/, '').trim().toLowerCase();
-  if (!handle) {
-    return c.json({ success: true, call: null });
+  const targetHandle = handle || verifiedHandle;
+
+  if (targetHandle !== verifiedHandle) {
+    return c.json({ success: false, error: 'Unauthorized handle access' }, 403);
   }
 
   const db = getDatabase(c);
@@ -96,7 +133,7 @@ callsApp.get('/active', async (c) => {
     const row = (await db.prepare(
       "SELECT * FROM calls WHERE (LOWER(receiver_handle) = ? OR LOWER(receiver_handle) = ?) AND status IN ('calling', 'ringing') AND created_at >= datetime('now', '-45 seconds') ORDER BY created_at DESC LIMIT 1"
     )
-      .bind(handle, `@${handle}`)
+      .bind(targetHandle, `@${targetHandle}`)
       .first()) as any;
 
     if (!row) {
@@ -120,9 +157,9 @@ callsApp.get('/active', async (c) => {
         receiverHandle: row.receiver_handle,
         callType: row.call_type,
         status: row.status,
-        createdAt: row.created_at,
-        startedAt: row.created_at,
-        endedAt: row.ended_at,
+        createdAt: ensureUtcIso(row.created_at),
+        startedAt: ensureUtcIso(row.created_at),
+        endedAt: row.ended_at ? ensureUtcIso(row.ended_at) : null,
         durationSeconds: row.duration_seconds || 0,
         sdpOffer: row.sdp_offer,
         sdpAnswer: row.sdp_answer,
@@ -136,6 +173,11 @@ callsApp.get('/active', async (c) => {
 });
 
 callsApp.get('/:id', async (c) => {
+  const verifiedHandle = getVerifiedHandle(c);
+  if (!verifiedHandle) {
+    return c.json({ success: false, error: 'Unauthorized to view this call' }, 401);
+  }
+
   const id = c.req.param('id');
   const db = getDatabase(c);
 
@@ -143,6 +185,13 @@ callsApp.get('/:id', async (c) => {
     const row = (await db.prepare('SELECT * FROM calls WHERE id = ? LIMIT 1').bind(id).first()) as any;
     if (!row) {
       return c.json({ success: false, error: 'Call not found' }, 404);
+    }
+
+    const callerClean = (row.caller_handle || '').replace(/^@+/, '').trim().toLowerCase();
+    const receiverClean = (row.receiver_handle || '').replace(/^@+/, '').trim().toLowerCase();
+
+    if (verifiedHandle !== callerClean && verifiedHandle !== receiverClean) {
+      return c.json({ success: false, error: 'Unauthorized to view this call' }, 403);
     }
 
     let callerCandidates = [];
@@ -162,9 +211,9 @@ callsApp.get('/:id', async (c) => {
         receiverHandle: row.receiver_handle,
         callType: row.call_type,
         status: row.status,
-        createdAt: row.created_at,
-        startedAt: row.created_at,
-        endedAt: row.ended_at,
+        createdAt: ensureUtcIso(row.created_at),
+        startedAt: ensureUtcIso(row.created_at),
+        endedAt: row.ended_at ? ensureUtcIso(row.ended_at) : null,
         durationSeconds: row.duration_seconds || 0,
         sdpOffer: row.sdp_offer,
         sdpAnswer: row.sdp_answer,
@@ -178,6 +227,11 @@ callsApp.get('/:id', async (c) => {
 });
 
 callsApp.post('/:id/answer', async (c) => {
+  const verifiedHandle = getVerifiedHandle(c);
+  if (!verifiedHandle) {
+    return c.json({ success: false, error: 'Unauthorized to answer call' }, 401);
+  }
+
   const id = c.req.param('id');
   const body = await c.req.json().catch(() => ({}));
   const sdpAnswer = body.sdpAnswer || body.sdp_answer || '';
@@ -188,6 +242,16 @@ callsApp.post('/:id/answer', async (c) => {
 
   const db = getDatabase(c);
   try {
+    const row = (await db.prepare('SELECT caller_handle, receiver_handle FROM calls WHERE id = ? LIMIT 1').bind(id).first()) as any;
+    if (!row) {
+      return c.json({ success: false, error: 'Call not found' }, 404);
+    }
+
+    const receiverClean = (row.receiver_handle || '').replace(/^@+/, '').trim().toLowerCase();
+    if (verifiedHandle !== receiverClean) {
+      return c.json({ success: false, error: 'Only the call recipient can answer' }, 403);
+    }
+
     await db.prepare("UPDATE calls SET sdp_answer = ?, status = 'connected' WHERE id = ?").bind(sdpAnswer, id).run();
     return c.json({ success: true });
   } catch (e: any) {
@@ -196,13 +260,22 @@ callsApp.post('/:id/answer', async (c) => {
 });
 
 callsApp.post('/:id/ice', async (c) => {
+  const verifiedHandle = getVerifiedHandle(c);
+  if (!verifiedHandle) {
+    return c.json({ success: false, error: 'Unauthorized candidate submission' }, 401);
+  }
+
   const id = c.req.param('id');
   const body = await c.req.json().catch(() => ({}));
-  const handle = (body.handle || '').replace(/^@+/, '').trim().toLowerCase();
+  const handle = (body.handle || verifiedHandle).replace(/^@+/, '').trim().toLowerCase();
   const candidate = body.candidate;
 
-  if (!handle || !candidate) {
-    return c.json({ success: false, error: 'Missing handle or candidate' }, 400);
+  if (!candidate) {
+    return c.json({ success: false, error: 'Missing candidate' }, 400);
+  }
+
+  if (handle !== verifiedHandle) {
+    return c.json({ success: false, error: 'Unauthorized candidate submission' }, 403);
   }
 
   const db = getDatabase(c);
@@ -215,20 +288,22 @@ callsApp.post('/:id/ice', async (c) => {
     const callerClean = (row.caller_handle || '').replace(/^@+/, '').trim().toLowerCase();
     const receiverClean = (row.receiver_handle || '').replace(/^@+/, '').trim().toLowerCase();
 
-    if (handle === callerClean) {
+    if (verifiedHandle === callerClean) {
       let list = [];
       try {
         list = JSON.parse(row.caller_candidates_json || '[]');
       } catch (_) {}
       list.push(candidate);
       await db.prepare('UPDATE calls SET caller_candidates_json = ? WHERE id = ?').bind(JSON.stringify(list), id).run();
-    } else if (handle === receiverClean) {
+    } else if (verifiedHandle === receiverClean) {
       let list = [];
       try {
         list = JSON.parse(row.receiver_candidates_json || '[]');
       } catch (_) {}
       list.push(candidate);
       await db.prepare('UPDATE calls SET receiver_candidates_json = ? WHERE id = ?').bind(JSON.stringify(list), id).run();
+    } else {
+      return c.json({ success: false, error: 'Unauthorized call participant' }, 403);
     }
 
     return c.json({ success: true });
@@ -238,6 +313,11 @@ callsApp.post('/:id/ice', async (c) => {
 });
 
 callsApp.post('/:id/status', async (c) => {
+  const verifiedHandle = getVerifiedHandle(c);
+  if (!verifiedHandle) {
+    return c.json({ success: false, error: 'Unauthorized to update call status' }, 401);
+  }
+
   const id = c.req.param('id');
   const body = await c.req.json().catch(() => ({}));
   const status = (body.status || 'ended').toLowerCase();
@@ -245,15 +325,26 @@ callsApp.post('/:id/status', async (c) => {
 
   const db = getDatabase(c);
   try {
-    const row = (await db.prepare('SELECT receiver_handle, status FROM calls WHERE id = ? LIMIT 1').bind(id).first()) as any;
+    const row = (await db.prepare('SELECT caller_handle, receiver_handle, status FROM calls WHERE id = ? LIMIT 1').bind(id).first()) as any;
+    if (!row) {
+      return c.json({ success: false, error: 'Call not found' }, 404);
+    }
+
+    const callerClean = (row.caller_handle || '').replace(/^@+/, '').trim().toLowerCase();
+    const receiverClean = (row.receiver_handle || '').replace(/^@+/, '').trim().toLowerCase();
+
+    if (verifiedHandle !== callerClean && verifiedHandle !== receiverClean) {
+      return c.json({ success: false, error: 'Unauthorized to update call status' }, 403);
+    }
 
     await db.prepare('UPDATE calls SET status = ?, duration_seconds = ?, ended_at = CURRENT_TIMESTAMP WHERE id = ?')
       .bind(status, durationSeconds, id)
       .run();
 
-    if (row && (status === 'missed' || status === 'ended' || durationSeconds === 0)) {
+    if (status === 'missed' || status === 'ended' || status === 'rejected' || status === 'cancelled') {
+      const targetPushHandle = verifiedHandle === callerClean ? row.receiver_handle : row.caller_handle;
       sendPushNotification({
-        targetHandle: row.receiver_handle,
+        targetHandle: targetPushHandle,
         title: 'Call Ended',
         body: 'Call ended',
         channelId: 'nearhood_calls',

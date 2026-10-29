@@ -235,21 +235,35 @@ mediaApp.get('/file/*', async (c) => {
     return c.json({ success: false, error: 'Access denied: Unknown media location' }, 403);
   }
 
-  // Private chat media verification
-  const isPrivateChatMedia = path.startsWith('users/') && path.includes('/chat/');
-  if (isPrivateChatMedia) {
-    const exp = c.req.query('exp') || '';
-    const sig = c.req.query('sig') || '';
-    const isValid = exp && sig ? await verifyMediaSignature(path, exp, sig) : false;
+  if (path.includes('/d1/') || path.endsWith('.json') || path.includes('/data/')) {
+    return c.json({ success: false, error: 'Forbidden: Private resource cannot be accessed via media endpoint' }, 403);
+  }
 
-    if (!isValid) {
-      if (AppConfig.mediaAllowLegacyUnsigned) {
-        console.warn(`[MediaAuth] Permitting legacy unsigned chat media access: ${path}`);
-      } else {
-        return c.json({ success: false, error: 'Forbidden: Valid media signature required' }, 403);
+  let isPrivateChatMedia = false;
+  if (path.startsWith('users/')) {
+    isPrivateChatMedia = path.includes('/chat/');
+    if (isPrivateChatMedia) {
+      const exp = c.req.query('exp') || '';
+      const sig = c.req.query('sig') || '';
+      const isValid = exp && sig ? await verifyMediaSignature(path, exp, sig) : false;
+
+      if (!isValid) {
+        if (AppConfig.mediaAllowLegacyUnsigned) {
+          console.warn(`[MediaAuth] Permitting legacy unsigned chat media access: ${path}`);
+        } else {
+          return c.json({ success: false, error: 'Forbidden: Valid media signature required' }, 403);
+        }
+      }
+    } else {
+      const allowedUserSubdirs = ['/r2/profile/', '/r2/feed/', '/r2/bazar/', '/r2/audio/', '/r2/misc/'];
+      const isAllowedSubdir = allowedUserSubdirs.some((sub) => path.includes(sub));
+      if (!isAllowedSubdir) {
+        return c.json({ success: false, error: 'Forbidden: Direct access to user root storage is denied' }, 403);
       }
     }
   }
+
+  const cacheHeader = isPrivateChatMedia ? 'private, no-cache, no-store' : 'public, max-age=86400';
 
   if (c.env && c.env.MEDIA_BUCKET) {
     const object = await c.env.MEDIA_BUCKET.get(path);
@@ -260,7 +274,7 @@ mediaApp.get('/file/*', async (c) => {
     object.writeHttpMetadata(headers);
     headers.set('Content-Type', getContentTypeFromPath(path, headers.get('Content-Type') || undefined));
     headers.set('etag', object.httpEtag);
-    headers.set('Cache-Control', 'public, max-age=31536000, immutable');
+    headers.set('Cache-Control', cacheHeader);
     headers.set('Accept-Ranges', 'bytes');
     headers.set('X-Content-Type-Options', 'nosniff');
     return new Response(object.body, { headers });
@@ -277,7 +291,7 @@ mediaApp.get('/file/*', async (c) => {
         headers.set('Content-Length', response.ContentLength.toString());
       }
       if (response.ETag) headers.set('ETag', response.ETag);
-      headers.set('Cache-Control', 'public, max-age=31536000, immutable');
+      headers.set('Cache-Control', cacheHeader);
       headers.set('Accept-Ranges', 'bytes');
       headers.set('Access-Control-Allow-Origin', '*');
       headers.set('Access-Control-Expose-Headers', 'Content-Length, ETag, Accept-Ranges');

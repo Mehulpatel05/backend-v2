@@ -4,6 +4,7 @@ import { verifyUserDeletion, DeletionAuditReport } from './verify_deletion';
 
 export interface ComprehensiveDeletionResult {
   success: boolean;
+  storagePurged?: boolean;
   message: string;
   verifiedZeroRecords: boolean;
   purgedTables: string[];
@@ -63,23 +64,27 @@ export async function orchestrateAccountDeletion(
       phone
     );
 
-    const isFullyDeleted = dbResult.success && auditReport.verifiedZeroRecords;
+    const isStoragePurged = r2Result.success;
+    const isFullyDeleted = dbResult.success && auditReport.verifiedZeroRecords && isStoragePurged;
 
     if (!isFullyDeleted) {
-      console.warn('[orchestrateAccountDeletion] Audit flagged remaining records:', auditReport.auditCounts);
+      console.warn('[orchestrateAccountDeletion] Incomplete deletion detected. Storage purged:', isStoragePurged, 'Audit:', auditReport.auditCounts);
     }
 
     return {
       success: isFullyDeleted,
+      storagePurged: isStoragePurged,
       message: isFullyDeleted
         ? 'Account, databases, and media storage completely and permanently wiped'
-        : 'Partial deletion detected; some records or foreign keys could not be wiped',
+        : (!isStoragePurged
+            ? 'Account database records were wiped, but media storage files could not be fully deleted'
+            : 'Partial deletion detected; some records or foreign keys could not be wiped'),
       verifiedZeroRecords: auditReport.verifiedZeroRecords,
       purgedTables: dbResult.purgedTables,
       deletedR2MediaCount: r2Result.deletedCount,
       auditReport,
-      warnings: dbResult.warnings,
-      error: dbResult.error,
+      warnings: [...dbResult.warnings, ...(r2Result.error ? [r2Result.error] : [])],
+      error: dbResult.error || (isStoragePurged ? undefined : 'Storage media wipe encountered errors'),
     };
   } catch (err: any) {
     console.error('[orchestrateAccountDeletion] Critical failure during orchestration:', err);

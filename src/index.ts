@@ -84,19 +84,24 @@ app.get('/system/app-icon', handleGetAppIcon);
 
 const handleFcmToken = async (c: any) => {
   const user = c.get('user');
-  const body = await c.req.json().catch(() => ({}));
-  const fcmToken = body.fcm_token || body.fcmToken || body.token || '';
-  const bodyHandle = (body.handle || '').replace(/^@+/, '').trim().toLowerCase();
   const sessionHandle = (user?.userHandle || '').replace(/^@+/, '').trim().toLowerCase();
-  const handles = Array.from(new Set([sessionHandle, bodyHandle].filter(Boolean)));
-  const db = getDatabase(c);
+  if (!sessionHandle) {
+    return c.json({ success: false, error: 'Unauthorized: Missing valid user session' }, 401);
+  }
 
+  const body = await c.req.json().catch(() => ({}));
+  const fcmToken = (body.fcm_token || body.fcmToken || body.token || '').trim();
+  const bodyHandle = (body.handle || '').replace(/^@+/, '').trim().toLowerCase();
+
+  if (bodyHandle && bodyHandle !== sessionHandle) {
+    return c.json({ success: false, error: 'Forbidden: Cannot update FCM token for another user account' }, 403);
+  }
+
+  const db = getDatabase(c);
   try {
-    for (const h of handles) {
-      await db.prepare('UPDATE profiles SET fcm_token = ?, updated_at = CURRENT_TIMESTAMP WHERE LOWER(handle) = ? OR LOWER(handle) = ?')
-        .bind(fcmToken, h, `@${h}`)
-        .run();
-    }
+    await db.prepare('UPDATE profiles SET fcm_token = ?, updated_at = CURRENT_TIMESTAMP WHERE LOWER(handle) = ? OR LOWER(handle) = ?')
+      .bind(fcmToken, sessionHandle, `@${sessionHandle}`)
+      .run();
   } catch (_) {}
 
   return c.json({ success: true, message: 'FCM token registered successfully' });

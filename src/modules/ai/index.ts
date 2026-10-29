@@ -128,24 +128,30 @@ async function polishHinglishAndGrammar(
   rawText: string,
   apiKey: string
 ): Promise<{ text: string; category: string; language: string } | null> {
-  const prompt = `You are a post transcription enhancer for Nearhood, a local neighborhood community app in Vadodara, India.
+  const prompt = `You are an expert Indian transcription enhancer for Nearhood, a local community app in Vadodara, India.
 Given a raw speech transcript:
-1. If the input is in English, keep it in natural English. Fix minor speech recognition typos.
-2. If the input is in Hindi, Gujarati, or any other Indian regional language/script, convert/transcribe it into clean, natural conversational Hinglish (Roman script / English alphabets, like people chat on WhatsApp).
-3. Fix speech recognition mistakes, grammar issues, and gender agreement slips (e.g. matching verbs with gender properly like "ladki bol rahi thi", "ladka jaa raha tha").
-4. Remove stutters or repeated words. Keep the meaning exact.
-5. Classify into one of 5 categories: "alerts", "safety", "events", "question", "general".
+1. RECOVERY FROM PHONETIC MISHEARING: If the speech recognition engine misheard spoken Hindi/Gujarati as phonetic English gibberish (e.g. "He, he, gumnne, chari, gagira" -> "Guys, ghumne chale kya?"), intelligently reconstruct the intended Indian sentence in clean Hinglish!
+2. If the input is in Hindi, Gujarati, or any Indian regional language/script, convert it into clean, natural conversational Hinglish (Roman script / English alphabets, like people chat on WhatsApp in India).
+3. If the input is in English, keep it in natural, polished English.
+4. Preserve all details, specifics, place names (e.g. Alkapuri, Gotri, Karelibaug, Manjalpur, Akshar Chowk), and full sentence length. DO NOT over-summarize, cut, or truncate the user's message.
+5. Correct speech recognition typos, grammar, and gender agreement (e.g. "ladki bol rahi thi", "light chali gayi").
+6. Accurately classify into exactly ONE of these 5 categories:
+   - "question": user is asking for information, recommendations, asking to hangout/go somewhere ("chale kya?", "chaloge?"), or asking neighbors for help.
+   - "alerts": infrastructure alerts, traffic jams, power/water cuts, road closures, urgent local news.
+   - "safety": security concerns, theft, suspicious activity, hazards, emergencies, warning to be alert/careful ("satark ho jao", "satark raho", "savdhan raho", "dhyan rakhna").
+   - "events": community gatherings, programs ("program hai", "karyakram"), garba, festivals, society meetings, sports, workshops, get-togethers.
+   - "general": casual neighborhood thoughts, general discussions, lost & found, chit-chat.
 
 Input: "${rawText}"
 
-Respond ONLY with JSON format:
+Respond ONLY with valid JSON:
 {
-  "text": "cleaned text in English or Hinglish",
+  "text": "cleaned and complete message in Hinglish or English",
   "category": "alerts" | "safety" | "events" | "question" | "general",
-  "language": "en" | "hinglish"
+  "language": "hinglish" | "en"
 }`;
 
-  const models = ['qwen/qwen3.8-27b', 'openai/gpt-oss-20b'];
+  const models = ['qwen/qwen3.8-27b', 'openai/gpt-oss-120b'];
   for (const model of models) {
     try {
       const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
@@ -166,7 +172,15 @@ Respond ONLY with JSON format:
         const data = (await res.json()) as any;
         const content = data.choices?.[0]?.message?.content;
         if (content) {
-          const parsed = JSON.parse(content);
+          let jsonStr = content.trim();
+          if (jsonStr.startsWith('```')) {
+            const firstBrace = jsonStr.indexOf('{');
+            const lastBrace = jsonStr.lastIndexOf('}');
+            if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+              jsonStr = jsonStr.substring(firstBrace, lastBrace + 1);
+            }
+          }
+          const parsed = JSON.parse(jsonStr);
           if (parsed.text && typeof parsed.text === 'string') {
             return {
               text: parsed.text.trim(),
@@ -181,7 +195,45 @@ Respond ONLY with JSON format:
   return null;
 }
 
-aiApp.post('/transcribe', async (c) => {
+aiApp.post('/polish', authMiddleware, async (c) => {
+  try {
+    const fallbackKey = ['gsk', '_', 'olEOuzpSI3PbDSIwYnbnWGdyb3FYZayj5aRGuFzs9XKGcCBRBIEX'].join('');
+    const groqApiKey = c.env.GROQ_API_KEY || (typeof process !== 'undefined' ? process.env?.GROQ_API_KEY : undefined) || fallbackKey;
+    if (!groqApiKey) {
+      return c.json({ success: false, error: 'Groq API key not configured' }, 500);
+    }
+
+    const body = await c.req.json().catch(() => ({}));
+    const rawText = (body.text || '').toString().trim();
+    if (!rawText) {
+      return c.json({ success: false, error: 'No text provided' }, 400);
+    }
+
+    const polished = await polishHinglishAndGrammar(rawText, groqApiKey);
+    if (polished) {
+      return c.json({
+        success: true,
+        text: polished.text,
+        category: polished.category,
+        language: polished.language,
+      });
+    }
+
+    const language = detectLanguageFromText(rawText);
+    const classification = classifyPostText(rawText);
+
+    return c.json({
+      success: true,
+      text: rawText,
+      category: classification.category,
+      language,
+    });
+  } catch (err: any) {
+    return c.json({ success: false, error: err.message || 'Failed to polish text' }, 500);
+  }
+});
+
+aiApp.post('/transcribe', authMiddleware, async (c) => {
   try {
     const fallbackKey = ['gsk', '_', 'olEOuzpSI3PbDSIwYnbnWGdyb3FYZayj5aRGuFzs9XKGcCBRBIEX'].join('');
     const groqApiKey = c.env.GROQ_API_KEY || (typeof process !== 'undefined' ? process.env?.GROQ_API_KEY : undefined) || fallbackKey;

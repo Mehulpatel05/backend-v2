@@ -305,24 +305,6 @@ async function handleSendMessage(c: any) {
     }
   }
 
-  // 1. Insert chat message first
-  await db.prepare(
-    `INSERT INTO chat_messages (
-      id, chat_id, sender_handle, receiver_handle,
-      content, media_r2_path, media_urls_json, message_type, is_read, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP)`
-  ).bind(
-    msgId,
-    canonicalId,
-    myHandle,
-    receiver,
-    content,
-    mediaR2Path,
-    mediaUrlsJson,
-    messageType
-  ).run();
-
-  // 2. Update/create chat summary with bound increment values
   await db.prepare(
     `INSERT INTO chats (
       id, canonical_id, user1_handle, user2_handle,
@@ -348,6 +330,22 @@ async function handleSendMessage(c: any) {
     isSenderUser1 ? 1 : 0,
     isSenderUser1 ? 0 : 1,
     isSenderUser1 ? 1 : 0
+  ).run();
+
+  await db.prepare(
+    `INSERT INTO chat_messages (
+      id, chat_id, sender_handle, receiver_handle,
+      content, media_r2_path, media_urls_json, message_type, is_read, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP)`
+  ).bind(
+    msgId,
+    canonicalId,
+    myHandle,
+    receiver,
+    content,
+    mediaR2Path,
+    mediaUrlsJson,
+    messageType
   ).run();
 
   // Trigger Notification to Receiver
