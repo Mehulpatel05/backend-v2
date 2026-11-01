@@ -27,9 +27,7 @@ chatApp.get('/', authMiddleware, async (c) => {
        COALESCE(pr.avatar_r2_path, '') AS other_avatar_r2_path,
        pr.is_verified,
        pr.bio,
-       af.seq AS founder_seq,
-       (SELECT cm.message_type FROM chat_messages cm WHERE (LOWER(cm.chat_id) = LOWER(c.canonical_id) OR LOWER(cm.chat_id) = LOWER(c.id)) ORDER BY cm.created_at DESC, cm.id DESC LIMIT 1) AS latest_msg_type,
-       (SELECT cm.media_r2_path FROM chat_messages cm WHERE (LOWER(cm.chat_id) = LOWER(c.canonical_id) OR LOWER(cm.chat_id) = LOWER(c.id)) ORDER BY cm.created_at DESC, cm.id DESC LIMIT 1) AS latest_media_path
+       af.seq AS founder_seq
      FROM chats c
      LEFT JOIN profiles pr ON LOWER(REPLACE(
        CASE 
@@ -73,22 +71,17 @@ chatApp.get('/', authMiddleware, async (c) => {
     const isVerified = isFounder || isVerifiedCitizen;
     const authorBadge = isFounder ? `FOUNDING #${row.founder_seq}` : (isVerifiedCitizen ? 'VERIFIED' : null);
 
-    const rawType = (row.latest_msg_type || row.last_message_type || '').toLowerCase();
-    const rawMedia = (row.latest_media_path || '').toLowerCase();
+    const rawType = (row.last_message_type || '').toLowerCase();
     const rawMsg = (row.last_message || '');
     const isVoice = rawType === 'voice_note' ||
       rawType === 'audio' ||
-      rawMedia.includes('voice_') ||
-      rawMedia.endsWith('.m4a') ||
-      rawMedia.endsWith('.aac') ||
-      rawMedia.endsWith('.mp3') ||
       rawMsg.includes('voice_') ||
       rawMsg.endsWith('.m4a') ||
       rawMsg.endsWith('.aac') ||
       rawMsg.endsWith('.mp3');
 
     const finalLastMsg = isVoice ? '🎤 Voice note' : (row.last_message || '');
-    const finalLastType = isVoice ? 'voice_note' : (row.latest_msg_type || row.last_message_type || 'text');
+    const finalLastType = isVoice ? 'voice_note' : (row.last_message_type || 'text');
 
     formatted.push({
       id: row.id,
