@@ -805,9 +805,14 @@ async function handleAddComment(c: any) {
     }
   }
 
+  const countRow = (await db.prepare('SELECT COUNT(*) AS total FROM feed_comments WHERE post_id = ?').bind(postId).first()) as any;
+  const realCount = countRow?.total != null ? Number(countRow.total) : 1;
+
   return c.json({
     success: true,
     commentId,
+    commentCount: realCount,
+    commentsCount: realCount,
     pointsAwarded,
     dailyCapReached,
     newBalance,
