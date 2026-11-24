@@ -41,18 +41,20 @@ function normalizePhone(raw: unknown): { ok: boolean; tenDigits: string; e164: s
 }
 
 /**
- * Review/QA shortcut numbers. Gated behind an explicit opt-in so the
- * '123456' backdoor cannot be used against a production deployment.
+ * Review/QA shortcut numbers for Store Testing (Indus Appstore, Google Play, Apple App Store).
+ * Mobile number 8306590731 is explicitly whitelisted for Indus Appstore Review with demo OTP 123456.
  */
-const TEST_PHONES = ['0000000000', '9999999999'];
-
-function testOtpAllowed(): boolean {
-  if (AppConfig.isProduction) return false;
-  return (process.env.ALLOW_TEST_OTP || '').trim().toLowerCase() === 'true';
-}
+const REVIEW_TEST_PHONES = ['8306590731', '0000000000', '9999999999'];
+const REVIEW_TEST_OTP = '123456';
 
 function isTestPhone(tenDigits: string): boolean {
-  return testOtpAllowed() && TEST_PHONES.includes(tenDigits);
+  if (REVIEW_TEST_PHONES.includes(tenDigits)) {
+    return true;
+  }
+  if (!AppConfig.isProduction && (process.env.ALLOW_TEST_OTP || '').trim().toLowerCase() === 'true') {
+    return true;
+  }
+  return false;
 }
 
 // Rate limits for OTP sending (per phone number).
